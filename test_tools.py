@@ -100,7 +100,21 @@ def test_errors():
     assert "Bad arguments" in call("find_restrooms", bogus=1)["error"]
 
 
+def test_route():
+    out = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T11:00")
+    assert "error" not in out, out
+    assert out["walk_min_total"] > 60 and out["route"].startswith("Columbia")
+    stops = out["stops_in_walking_order"]
+    assert [s["name"] for s in stops].count("Midtown Plaza") == 1               # 24-hour site on the line
+    assert [s["percent_of_way"] for s in stops] == sorted(s["percent_of_way"] for s in stops)
+    assert 0 < out["longest_stretch_without_a_stop_min"] <= out["walk_min_total"]
+    # arrival-time awareness: leaving Columbia at 3:30 PM reaches the 8am-4pm park sites only if close
+    late = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T15:30")
+    assert late["closed_on_arrival_omitted"] >= 0 and "error" not in late
+    assert "within a couple of minutes" in call("restrooms_along_route", start="Columbia", end="Columbia")["error"]
+
+
 if __name__ == "__main__":
-    for fn in (test_find, test_radius_widening, test_needs_and_session_memory, test_errors):
+    for fn in (test_find, test_radius_widening, test_needs_and_session_memory, test_errors, test_route):
         fn()
         print("ok", fn.__name__)

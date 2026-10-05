@@ -16,15 +16,17 @@ import hashlib
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
 
 from geo import (
+    detour_m,
     grid_distance_m,
     haversine_m,
     in_nyc,
+    route_position,
     walk_minutes,
 )
 from hours import availability, hours_for_day
@@ -301,6 +303,71 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
     return out
 
 
+# --- restrooms_along_route ---
+
+
+def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int = 300,
+                          needs: list | None = None, when: str | None = None, limit: int = 5) -> dict:
+    a, start_label = geocode(start)
+    b, end_label = geocode(end)
+    when_dt = _parse_when(when)
+    needs = _resolve_needs(state, needs)
+    max_detour_m, limit = _clamp(max_detour_m, 50, 1500, 300), _clamp(limit, 1, 8, 5)
+
+    total_m = grid_distance_m(a, b)
+    if total_m < 200:
+        raise ToolError("Start and end are within a couple of minutes' walk of each other. Use find_restrooms near the start instead.")
+    total_min = walk_minutes(total_m)
+
+    found, closed = [], 0
+    for site in nyc_sites():
+        detour = detour_m(a, b, site["point"])
+        if detour > max_detour_m:
+            continue
+        to_stop = grid_distance_m(a, site["point"])
+        arrival = when_dt + timedelta(minutes=walk_minutes(to_stop))  # judge hours at the time you would arrive
+        verdict = availability(site["row"], arrival)
+        if verdict["state"] == "closed":
+            closed += 1
+            continue
+        fit, unconfirmed = _meets(site, needs)
+        if fit == "no":
+            continue
+        found.append((detour, to_stop, site, verdict, unconfirmed, fit))
+
+    found.sort(key=lambda f: (f[5] != "yes", f[0]))
+    picked = found[:limit]
+    picked.sort(key=lambda f: route_position(a, b, f[2]["point"]))  # present in walking order
+
+    stops = []
+    for detour, to_stop, site, verdict, unconfirmed, _fit in picked:
+        record = _describe(site, to_stop, verdict, when_dt, unconfirmed)
+        record["minutes_into_walk"] = record.pop("walk_min")
+        record.pop("walk_m")
+        record["extra_walk_min"] = walk_minutes(detour) if detour > 20 else 0
+        record["percent_of_way"] = int(round(100 * route_position(a, b, site["point"])))
+        stops.append(record)
+
+    fractions = [0.0] + [s["percent_of_way"] / 100 for s in stops] + [1.0]
+    longest_gap = max(y - x for x, y in zip(fractions, fractions[1:])) * total_min
+    out = {
+        "route": f"{start_label} → {end_label}",
+        "walk_min_total": total_min,
+        "leaving_at": when_dt.strftime("%A %H:%M") + " (NYC time)",
+        "needs_applied": needs,
+        "stops_in_walking_order": stops,
+        "longest_stretch_without_a_stop_min": int(round(longest_gap)),
+        "closed_on_arrival_omitted": closed,
+        "note": "Route is approximated as a grid walk between the two points, not turn-by-turn directions.",
+    }
+    if not stops:
+        out["message"] = (
+            f"No official restroom within {max_detour_m} m of the route is open when you would pass it. "
+            "Try a larger max_detour_m (up to 1500)."
+        )
+    return out
+
+
 # --- What the model sees ---
 
 _LOCATION = (
@@ -328,7 +395,7 @@ TOOLS = [
         "description": (
             "Find official NYC public restrooms (parks, libraries, plazas) near a place, ranked by estimated "
             "walking time, skipping sites that are closed at the requested time. Use for any 'nearest restroom / "
-            "bathroom / toilet' question."
+            "bathroom / toilet' question. Not for walking routes (use restrooms_along_route)."
         ),
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": _LOCATION},
@@ -338,10 +405,28 @@ TOOLS = [
             "limit": {"type": "integer", "description": "Max results, 1-10. Default 5."},
         }, "required": ["location"]},
     }},
+    {"type": "function", "function": {
+        "name": "restrooms_along_route",
+        "description": (
+            "Find official NYC public restrooms near a walking route from a start to an end, ranked by how little "
+            "extra walking they add, in the order the walker would reach them. Checks each site's hours for the time "
+            "the walker would actually arrive, and reports the longest stretch without a stop. Use when the user is "
+            "going from A to B. Not for 'near me' questions (use find_restrooms)."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "start": {"type": "string", "description": "Start of the walk. " + _LOCATION},
+            "end": {"type": "string", "description": "End of the walk (same formats as start)."},
+            "max_detour_m": {"type": "integer", "description": "Longest acceptable extra walking distance per stop, in meters, 50-1500. Default 300."},
+            "needs": _NEEDS,
+            "when": {**_WHEN, "description": "Optional. When the walk STARTS: ISO 8601 NYC local time. Omit for right now."},
+            "limit": {"type": "integer", "description": "Max stops, 1-8. Default 5."},
+        }, "required": ["start", "end"]},
+    }},
 ]
 
 TOOL_MAP = {
     "find_restrooms": find_restrooms,
+    "restrooms_along_route": restrooms_along_route,
 }
 
 
