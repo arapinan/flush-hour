@@ -3,6 +3,7 @@
 Data sources (all free, no API key):
   - NYC Open Data "Public Restrooms" (official, ~1,000 sites, has hours)
   - NYC Planning Labs GeoSearch (address -> coordinates)
+  - OpenStreetMap Nominatim (business and venue names -> coordinates; GeoSearch does not know these)
   - Refuge Restrooms (community-submitted listings; can be old)
   - OpenStreetMap via Overpass (best effort: public servers time out often)
 
@@ -119,36 +120,212 @@ def _resolve_needs(state: dict, needs: list | None) -> list[str]:
 
 # --- Geocoding ---
 
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+GEOSEARCH_GAP_M = 1000  # street/address matches this far apart are different places
+VENUE_GAP_M = 1000  # named places closer than this are one place (a bridge or a street comes back as many pieces); farther apart = different branches
+NOMINATIM_GAP_S = 1.1  # Nominatim's usage policy: at most one request per second (it answers 429 otherwise)
+_last_nominatim = [0.0]
+MAX_OPTIONS = 4
+TOO_MANY_PLACES = 5  # this many distinct matches means a chain or a very common name: ask for a neighborhood instead
+NYC_VIEWBOX = "-74.27,40.92,-73.68,40.49"  # left,top,right,bottom
 _COORDS = re.compile(r"(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)")
 
 
+class NeedsClarification(Exception):
+    """The place matches several different places. Carries a payload the model relays to the user."""
+
+    def __init__(self, query: str, candidates: list[dict], weak: bool = False):
+        super().__init__(query)
+        options = [
+            {"label": c["label"], "location": f"{c['label']} @ {c['point'][0]:.5f},{c['point'][1]:.5f}"}
+            for c in candidates[:MAX_OPTIONS]
+        ]
+        self.payload = {
+            "needs_clarification": True,
+            "question": (
+                f"I could not find an exact match for '{query}'. The closest matches are listed. "
+                "Ask the user whether one of them is right, or for a nearby cross street."
+                if weak else
+                f"'{query}' matches {len(options)} different places in NYC. Ask the user which one they mean."
+            ),
+            "options": options,
+            "advice": (
+                "List the options briefly and wait for the answer. Then call the tool again with the chosen "
+                "option's `location` value exactly as given. Do not guess."
+            ),
+        }
+
+
+def _spread(candidates: list[dict], min_gap_m: float) -> list[dict]:
+    """One candidate per distinct place, keeping the API's ranking order."""
+    kept: list[dict] = []
+    for c in candidates:
+        if all(haversine_m(c["point"], k["point"]) >= min_gap_m for k in kept):
+            kept.append(c)
+    return kept
+
+
+def _geosearch_candidates(text: str) -> list[dict]:
+    data = _get_json(GEOSEARCH_URL, {"text": text, "size": 5})
+    found = []
+    for feature in data.get("features") or []:
+        lon, lat = feature["geometry"]["coordinates"]
+        props = feature.get("properties", {})
+        if in_nyc((lat, lon)):
+            label = re.sub(r",\s*NY,\s*USA$", "", props.get("label") or props.get("name") or text)
+            found.append({"label": label, "point": (lat, lon), "confidence": props.get("confidence"), "fallback": props.get("match_type") == "fallback",
+                          "name_text": label.split(",")[0],
+                          "match_text": " ".join(str(props.get(k, "")) for k in ("label", "name", "street"))})
+    if found and found[0]["confidence"] is not None:  # drop clearly weaker matches
+        floor = found[0]["confidence"] - 0.1
+        found = [c for c in found if c["confidence"] is None or c["confidence"] >= floor]
+    return found
+
+
+def _venue_candidates(text: str) -> list[dict]:
+    """Business and venue names (GeoSearch only knows addresses), via OpenStreetMap Nominatim."""
+    params = {"q": text, "format": "jsonv2", "limit": 10, "addressdetails": 1,
+              "countrycodes": "us", "viewbox": NYC_VIEWBOX, "bounded": 1}
+    found = []
+    for attempt in range(2):   # polite: one request per second, and one retry if we are told to slow down
+        wait = NOMINATIM_GAP_S - (time.time() - _last_nominatim[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_nominatim[0] = time.time()
+        try:
+            rows = _get_json(NOMINATIM_URL, params)
+            break
+        except requests.HTTPError as e:
+            if attempt == 1 or getattr(e.response, "status_code", None) != 429:
+                raise
+            time.sleep(2)
+    for r in rows:
+        try:
+            point = (float(r["lat"]), float(r["lon"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not in_nyc(point):
+            continue
+        a = r.get("address", {})
+        # The bounding box also covers New Jersey and Nassau County; keep only New York City addresses.
+        if a.get("state") not in (None, "New York") or a.get("city") not in (None, "New York"):
+            continue
+        street = " ".join(p for p in (a.get("house_number"), a.get("road")) if p)
+        area = a.get("neighbourhood") or a.get("suburb") or a.get("city_district") or a.get("borough")
+        name = r.get("name") or (r.get("display_name") or "").split(",")[0]
+        if street.lower() == name.lower():
+            street = ""
+        label = ", ".join(p for p in (name, street, area) if p)
+        found.append({"label": label or text, "point": point, "name_text": name,
+                      "match_text": f"{r.get('name', '')} {r.get('display_name', '')}"})
+    return found
+
+
+def _tokens(s: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", s.lower()))
+
+
+def _fits_query(candidate: dict, query_tokens: set[str], threshold: float = 0.75) -> bool:
+    """Does the candidate actually contain the words the user typed? Rejects fuzzy guesses
+    (the GeoSearch 'fallback' that answers 'Amity Hall' with some Amity Street)."""
+    if not query_tokens:
+        return True
+    return len(query_tokens & _tokens(candidate["match_text"])) / len(query_tokens) >= threshold
+
+
+def _prefer_exact(query_tokens: set[str], candidates: list[dict]) -> list[dict]:
+    """If some candidates are named exactly what the user typed, drop the ones that merely contain it
+    ('Columbia University' should not also match 'Columbia University Boathouse')."""
+    exact = [c for c in candidates if _tokens(c.get("name_text", "")) == query_tokens]
+    return exact or candidates
+
+
+_venue_lookup_failed = [False]  # set when the last place-name lookup errored (as opposed to finding nothing)
+
+
+def _safe_venues(text: str) -> list[dict]:
+    try:
+        _venue_lookup_failed[0] = False
+        return _venue_candidates(text)
+    except (requests.RequestException, ValueError):
+        _venue_lookup_failed[0] = True
+        return []
+
+
 def geocode(text: str) -> tuple[tuple[float, float], str]:
-    """Place text or 'lat,lon' -> ((lat, lon), label). Raises ToolError if it cannot be placed in NYC."""
+    """Place text or 'lat,lon' -> ((lat, lon), label).
+
+    Raises ToolError (fixable) or NeedsClarification (several matching places).
+    A location of the form 'Some label @ lat,lon' is what the clarification options use.
+    """
     if not text or not text.strip():
         raise ToolError("No location given. Ask the user where they are (address, intersection, or landmark).")
 
-    coords = _COORDS.search(text)
+    coords = list(_COORDS.finditer(text))
     if coords:
-        point = (float(coords.group(1)), float(coords.group(2)))
+        last = coords[-1]
+        point = (float(last.group(1)), float(last.group(2)))
+        label = text.split("@")[0].strip() if "@" in text else ""
         if not in_nyc(point):
             raise ToolError(f"'{text}' is outside New York City, and this agent only covers the five boroughs.")
-        return point, "your GPS location"
+        return point, label or "your GPS location"
 
     def lookup():
-        data = _get_json(GEOSEARCH_URL, {"text": text.strip(), "size": 5})
-        for feature in data.get("features") or []:
-            lon, lat = feature["geometry"]["coordinates"]
-            if in_nyc((lat, lon)):
-                return {"point": (lat, lon), "label": feature.get("properties", {}).get("label") or text.strip()}
-        return None
+        query = text.strip()
+        geo = _geosearch_candidates(query)
+        # Addresses and intersections: the city's own geocoder is authoritative.
+        if re.search(r"\d|&|/|\b(?:and|at)\b", query.lower()):
+            good = [c for c in geo if not c.get("fallback")]   # GeoSearch guesses ('6 ST AND AVE B' for '14th Street & 6th Avenue') are not answers
+            if good:
+                return {"candidates": _spread(good, GEOSEARCH_GAP_M), "weak": False}
+            venues = _spread(_safe_venues(query), VENUE_GAP_M)
+            if venues:
+                return {"candidates": venues, "weak": False}
+            return {"candidates": _spread(geo, GEOSEARCH_GAP_M), "weak": bool(geo)}
+        # Names (places, businesses, streets): trust a result only if it contains the words typed,
+        # and prefer ones named exactly that.
+        words = _tokens(query)
+        geo_good = _prefer_exact(words, [c for c in geo if _fits_query(c, words)])
+        venues = _spread(_prefer_exact(words, [c for c in _safe_venues(query) if _fits_query(c, words)]), VENUE_GAP_M)
+        if len(venues) >= TOO_MANY_PLACES:
+            return {"too_many": True, "candidates": venues, "weak": False}
+        near = [v for v in venues if any(haversine_m(v["point"], g["point"]) < GEOSEARCH_GAP_M for g in geo_good)]
+        if geo_good and near:   # both services agree on one spot ('Astor Place' in Manhattan; another one may exist in Queens)
+            return {"candidates": [near[0]], "weak": False}
+        if len(venues) >= 2:  # several real places share this name (branches, or a long street): ask
+            return {"candidates": venues, "weak": False}
+        if geo_good:
+            return {"candidates": _spread(geo_good, GEOSEARCH_GAP_M), "weak": False}
+        if venues:
+            return {"candidates": venues, "weak": False}
+        return {"candidates": _spread(geo, GEOSEARCH_GAP_M), "weak": True}  # only weak guesses: confirm with the user
 
-    found = _cached("geo:" + text.strip().lower(), 86400, lookup)
+    fresh = {}
+
+    def lookup_for_cache():
+        _venue_lookup_failed[0] = False
+        fresh["result"] = lookup()
+        # Do not remember an answer reached while the place-name service was erroring: it may be wrong or empty.
+        return fresh["result"] if fresh["result"]["candidates"] and not _venue_lookup_failed[0] else None
+
+    result = _cached("geo:" + text.strip().lower(), 86400, lookup_for_cache) or fresh.get("result")
+    found = result["candidates"] if result else []
+    if result and result.get("too_many"):
+        raise ToolError(
+            f"'{text}' matches many places across NYC (a chain, or a long street). Ask the user for a "
+            "neighborhood, cross street or address near where they are."
+        )
     if not found:
         raise ToolError(
-            f"Could not find '{text}' in NYC. Try a street address, an intersection like 'Broadway & 116th St', "
-            "or a well-known landmark, or ask the user for a nearby cross street."
+            f"Could not find '{text}' in NYC. Try a street address, a landmark or business name, or an "
+            "intersection written with full street names like 'Amsterdam Avenue & West 116th Street'. "
+            "If that fails, ask the user for a nearby landmark or address."
+            + (" (The place-name lookup service is busy right now, so a street address or intersection is the safer input.)"
+               if _venue_lookup_failed[0] else "")
         )
-    return found["point"], found["label"]
+    if result["weak"] or len(found) > 1:
+        raise NeedsClarification(text.strip(), found, weak=result["weak"])
+    return found[0]["point"], found[0]["label"]
 
 
 # --- Official NYC data ---
@@ -568,9 +745,10 @@ def remember_needs(state: dict, needs: list) -> dict:
 
 _LOCATION = (
     "Where to search: a NYC street address, intersection, landmark, or neighborhood "
-    "(e.g. 'Union Square', 'Broadway & 116th St'), "
+    "(e.g. 'Union Square', 'Amsterdam Avenue & West 116th Street'; write intersections with full street names), "
     "or GPS as 'lat,lon' (e.g. '40.8075,-73.9626'). "
-    "If the user's message contains '[my GPS location: lat,lon]', pass those coordinates."
+    "If the user's message contains '[my GPS location: lat,lon]', pass those coordinates. "
+    "If a result says needs_clarification, ask the user which place they mean, then pass the chosen option's `location` exactly."
 )
 _NEEDS = {
     "type": "array",
@@ -678,6 +856,8 @@ def run_tool(name: str, args: dict, state: dict) -> str:
         return json.dumps({"error": f"Unknown tool '{name}'. Available: {list(TOOL_MAP)}"})
     try:
         return json.dumps(TOOL_MAP[name](state, **args), ensure_ascii=False)
+    except NeedsClarification as e:
+        return json.dumps(e.payload, ensure_ascii=False)
     except ToolError as e:
         return json.dumps({"error": str(e)})
     except TypeError as e:
