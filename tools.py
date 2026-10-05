@@ -247,7 +247,7 @@ def _describe(site: dict, walk_m: float, verdict: dict, when: datetime, unconfir
     return record
 
 
-# --- find_restrooms ---
+# --- Tool 1 (shared): find_restrooms ---
 
 
 def find_restrooms(state: dict, location: str, radius_m: int | None = None, needs: list | None = None,
@@ -317,7 +317,7 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
     return out
 
 
-# --- restrooms_along_route ---
+# --- Tool 2: restrooms_along_route ---
 
 
 def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int = 300,
@@ -382,7 +382,7 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     return out
 
 
-# --- check_open_status ---
+# --- Tool 3: check_open_status ---
 
 
 def check_open_status(state: dict, restroom_id: str, when: str | None = None) -> dict:
@@ -418,7 +418,7 @@ def check_open_status(state: dict, restroom_id: str, when: str | None = None) ->
     return out
 
 
-# --- fallback_options ---
+# --- Tool 4: fallback_options ---
 
 
 def _refuge_near(origin: tuple[float, float], per_page: int = 30) -> list[dict]:
@@ -553,6 +553,17 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     return out
 
 
+# --- Tool 5: remember_needs ---
+
+
+def remember_needs(state: dict, needs: list) -> dict:
+    bad = [n for n in needs if n not in NEEDS]
+    if bad:
+        raise ToolError(f"Unknown need(s) {bad}. Allowed values: {NEEDS}.")
+    state["needs"] = list(dict.fromkeys(needs))
+    return {"saved_needs": state["needs"], "effect": "Later searches in this chat apply these automatically unless `needs` is passed."}
+
+
 # --- What the model sees ---
 
 _LOCATION = (
@@ -635,6 +646,17 @@ TOOLS = [
             "limit": {"type": "integer", "description": "Max options, 1-10. Default 6."},
         }, "required": ["location"]},
     }},
+    {"type": "function", "function": {
+        "name": "remember_needs",
+        "description": (
+            "Save the user's restroom requirements for the rest of this chat so later searches apply them "
+            "automatically. Call when the user states a standing need (\"I use a wheelchair\", \"I have a baby\"). "
+            "Pass [] to clear them."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "needs": {"type": "array", "items": {"type": "string", "enum": NEEDS}, "description": "The full list of needs to remember. Replaces any earlier list."},
+        }, "required": ["needs"]},
+    }},
 ]
 
 TOOL_MAP = {
@@ -642,6 +664,7 @@ TOOL_MAP = {
     "restrooms_along_route": restrooms_along_route,
     "check_open_status": check_open_status,
     "fallback_options": fallback_options,
+    "remember_needs": remember_needs,
 }
 
 

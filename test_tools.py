@@ -116,6 +116,15 @@ def test_needs_and_session_memory():
     assert mystery_idx > names.index("Anibal Aviles Playground")
     assert "wheelchair" in out["results"][mystery_idx]["unconfirmed_needs"]
 
+    state = {}
+    assert call("remember_needs", state, needs=["changing_station"])["saved_needs"] == ["changing_station"]
+    out = call("find_restrooms", state, location="Broadway & 116th St", when="2026-10-05T11:00")
+    assert out["needs_applied"] == ["changing_station"]
+    assert "Playground 123" not in [r["name"] for r in out["results"]]        # changing_stations = No
+    assert call("find_restrooms", state, location="Broadway & 116th St", needs=[])["needs_applied"] == []
+    other_session = call("find_restrooms", {}, location="Broadway & 116th St")
+    assert other_session["needs_applied"] == []                               # sessions stay separate
+
 
 def test_errors():
     assert "Could not find" in call("find_restrooms", location="nowhere land")["error"]
