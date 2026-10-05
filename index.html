@@ -1,194 +1,457 @@
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="UTF-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Gemini Web Tool Calling (live!)</title>
-        <style>
-            * {
-                box-sizing: border-box;
-                margin: 0;
-                padding: 0;
-            }
-            body {
-                font-family: system-ui, sans-serif;
-                height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                padding: 3rem 1rem;
-            }
-            #container {
-                width: 100%;
-                max-width: 900px;
-                display: flex;
-                flex-direction: column;
-                border: 1px solid #e0e0e0;
-            }
-            #messages {
-                overflow-y: auto;
-                padding: 2rem;
-                display: flex;
-                flex-direction: column;
-                gap: 1.5rem;
-                min-height: 450px;
-                max-height: 70vh;
-            }
-            .msg {
-                line-height: 1.5;
-                max-width: 80%;
-            }
-            .msg.user {
-                align-self: flex-end;
-                text-align: right;
-            }
-            .msg .role {
-                font-size: 0.75rem;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                color: #999;
-                margin-bottom: 0.25rem;
-            }
-            .msg.loading .content {
-                color: #999;
-            }
-            #input-area {
-                display: flex;
-                gap: 1rem;
-                padding: 1.5rem;
-                border-top: 1px solid #e0e0e0;
-            }
-            #user-input {
-                flex: 1;
-                padding: 0.75rem 0;
-                border: none;
-                border-bottom: 1px solid #e0e0e0;
-                font-size: 1rem;
-                outline: none;
-            }
-            #user-input:focus {
-                border-bottom-color: #000;
-            }
-            button {
-                padding: 0.75rem 1.5rem;
-                background: #000;
-                color: #fff;
-                border: none;
-                font-size: 0.75rem;
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                cursor: pointer;
-            }
-            .tool {
-                font-family: ui-monospace, monospace;
-                font-size: 0.75rem;
-                color: #555;
-                background: #f5f5f5;
-                border-left: 3px solid #f59e0b;
-                padding: 0.5rem 0.75rem;
-                margin: 0.25rem 0 0.75rem;
-                white-space: pre-wrap;
-                word-break: break-word;
-            }
-            .tool .label {
-                text-transform: uppercase;
-                letter-spacing: 0.05em;
-                color: #b45309;
-            }
-            button:disabled {
-                opacity: 0.3;
-            }
-        </style>
-    </head>
-    <body>
-        <div id="container">
-            <div id="messages"></div>
-            <div id="input-area">
-                <input
-                    type="text"
-                    id="user-input"
-                    placeholder="Type a message..."
-                    autocomplete="off"
-                />
-                <button id="send-btn">Send</button>
-            </div>
-        </div>
-        <script>
-            const messages = document.getElementById("messages");
-            const userInput = document.getElementById("user-input");
-            const sendBtn = document.getElementById("send-btn");
-            let sessionId = null;
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Flush Hour: open public restrooms in NYC</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Overpass:wght@400;600;800;900&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --porcelain: #eef3f1;
+    --glaze: #fbfdfc;
+    --grout: #c9d6d1;
+    --green: #1f5a3f;
+    --ink: #12302a;
+    --muted: #4d6a62;
+    --open: #2f9e5b;
+    --closed: #b93a2f;
+    --unsure: #c98a0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { background: var(--porcelain); }
+  body {
+    font-family: "Overpass", system-ui, sans-serif;
+    color: var(--ink);
+    line-height: 1.5;
+    min-height: 100dvh;
+    background-color: var(--porcelain);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='48' height='48'%3E%3Cpath d='M0 .5h48M0 24.5h48M.5 0v24M24.5 24v24' stroke='%23d3dfda' fill='none'/%3E%3C/svg%3E");
+  }
+  :focus-visible { outline: 3px solid var(--green); outline-offset: 2px; }
 
-            function addMessage(role, text, isLoading = false) {
-                const div = document.createElement("div");
-                div.className =
-                    "msg " +
-                    (role === "you" ? "user" : "assistant") +
-                    (isLoading ? " loading" : "");
-                div.innerHTML =
-                    '<div class="role">' +
-                    role +
-                    '</div><div class="content">' +
-                    text +
-                    "</div>";
-                messages.appendChild(div);
-                messages.scrollTop = messages.scrollHeight;
-                return div;
-            }
+  .app { max-width: 760px; margin: 0 auto; padding: 1rem 1rem 10.5rem; }
 
-            async function send() {
-                const text = userInput.value.trim();
-                if (!text) return;
+  /* Header: a Parks-style sign plaque on the tiled wall */
+  .plaque {
+    background: var(--green);
+    color: #fff;
+    border-radius: 14px;
+    padding: 1.1rem 1.25rem 1.2rem;
+    border: 3px solid #fff;
+    box-shadow: 0 0 0 3px var(--green);
+    margin: 0.75rem 3px 1.25rem;
+  }
+  .plaque h1 { font-size: clamp(2rem, 7vw, 2.9rem); font-weight: 900; letter-spacing: -0.02em; line-height: 1; }
+  .plaque p { margin-top: 0.5rem; font-size: 1.02rem; max-width: 52ch; color: #e3f1ea; }
 
-                userInput.value = "";
-                sendBtn.disabled = true;
-                addMessage("you", text);
-                const loading = addMessage("assistant", "Thinking...", true);
+  .panel { background: var(--glaze); border: 1px solid var(--grout); border-radius: 10px; }
 
-                try {
-                    const res = await fetch("/chat", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            message: text,
-                            session_id: sessionId,
-                        }),
-                    });
-                    const data = await res.json();
-                    sessionId = data.session_id;
+  /* Empty state: what this is and how to use it */
+  #intro { padding: 1.1rem 1.25rem; margin-bottom: 1rem; }
+  #intro h2 { font-size: 1.15rem; font-weight: 800; margin-bottom: 0.4rem; }
+  #intro p { color: var(--muted); max-width: 60ch; margin-bottom: 0.9rem; }
+  .examples { display: grid; gap: 0.5rem; }
+  .example {
+    text-align: left; font: inherit; color: var(--ink); background: var(--porcelain);
+    border: 1px solid var(--grout); border-radius: 8px; padding: 0.65rem 0.8rem; cursor: pointer;
+  }
+  .example:hover { border-color: var(--green); background: #e4eeea; }
 
-                    // Show each tool the harness ran, above the assistant's answer
-                    for (const call of data.tool_calls || []) {
-                        const div = document.createElement("div");
-                        div.className = "tool";
-                        const label = document.createElement("span");
-                        label.className = "label";
-                        label.textContent = "tool call  ";
-                        div.appendChild(label);
-                        div.appendChild(
-                            document.createTextNode(
-                                call.name + "(" + JSON.stringify(call.args) + ")\n→ " + call.result,
-                            ),
-                        );
-                        messages.insertBefore(div, loading);
-                    }
-                    loading.querySelector(".content").textContent =
-                        data.response;
-                    loading.classList.remove("loading");
-                } catch (e) {
-                    loading.querySelector(".content").textContent =
-                        "Error: " + e.message;
-                    loading.classList.remove("loading");
-                }
-                sendBtn.disabled = false;
-                userInput.focus();
-            }
+  .needs { font-size: 0.9rem; color: var(--muted); margin: 0 0 0.75rem; min-height: 1.3em; }
+  .needs b { color: var(--green); font-weight: 800; }
 
-            sendBtn.addEventListener("click", send);
-            userInput.addEventListener("keydown", function (e) {
-                if (e.key === "Enter") send();
-            });
-            userInput.focus();
-        </script>
-    </body>
+  /* Conversation */
+  #feed { display: flex; flex-direction: column; gap: 1rem; }
+  .turn-you { align-self: flex-end; max-width: 85%; background: var(--green); color: #fff; padding: 0.6rem 0.9rem; border-radius: 14px 14px 3px 14px; white-space: pre-wrap; }
+  .turn-you small { display: block; opacity: 0.8; font-size: 0.8rem; }
+  .turn-bot { max-width: 100%; }
+  .turn-bot .text { white-space: pre-wrap; padding: 0.1rem 0.15rem; }
+  .thinking { color: var(--muted); }
+  .thinking::after { content: ""; display: inline-block; width: 1.2em; text-align: left; animation: dots 1.2s steps(4, end) infinite; }
+  @keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+
+  /* Results */
+  .results { display: grid; gap: 0.6rem; margin: 0.7rem 0 0.3rem; }
+  .results-head { font-size: 0.92rem; color: var(--muted); }
+  .card { display: grid; grid-template-columns: 4.4rem 1fr; background: var(--glaze); border: 1px solid var(--grout); border-radius: 10px; overflow: hidden; }
+  .tile { background: var(--porcelain); border-right: 1px solid var(--grout); display: grid; place-content: center; text-align: center; padding: 0.5rem 0.25rem; }
+  .tile b { font-size: 1.9rem; font-weight: 900; line-height: 1; color: var(--green); }
+  .tile span { font-size: 0.74rem; color: var(--muted); line-height: 1.2; }
+  .body { padding: 0.6rem 0.8rem 0.7rem; min-width: 0; }
+  .name { font-weight: 800; font-size: 1.05rem; line-height: 1.25; overflow-wrap: anywhere; }
+  .sub { font-size: 0.9rem; color: var(--muted); margin-top: 0.15rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 0.4rem 0.5rem; align-items: center; margin-top: 0.4rem; }
+  .tag { font-size: 0.8rem; border: 1px solid var(--grout); border-radius: 999px; padding: 0.05rem 0.55rem; background: var(--porcelain); }
+  .go { font-size: 0.9rem; font-weight: 800; color: var(--green); text-decoration: underline; text-underline-offset: 3px; }
+
+  /* Door-lock style status: a little window that shows the state */
+  .lock { display: inline-flex; align-items: center; gap: 0.4rem; font-weight: 800; font-size: 0.88rem; border: 1px solid var(--grout); border-radius: 6px; padding: 0.1rem 0.5rem 0.1rem 0.15rem; background: #fff; }
+  .lock i { width: 1.15rem; height: 1.15rem; border-radius: 3px; background: var(--c); box-shadow: inset 0 -3px 0 rgba(0,0,0,0.18); }
+  .lock.open { --c: var(--open); }
+  .lock.closed { --c: var(--closed); }
+  .lock.unclear { --c: var(--unsure); }
+
+  .note { border-left: 4px solid var(--unsure); background: #fbf3df; padding: 0.5rem 0.75rem; border-radius: 0 8px 8px 0; font-size: 0.92rem; }
+  .week { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: 0.25rem 0.75rem; font-size: 0.88rem; margin-top: 0.5rem; }
+  .week div { display: flex; justify-content: space-between; gap: 0.5rem; border-bottom: 1px dotted var(--grout); }
+
+  /* How the agent got its answer */
+  details.how { margin-top: 0.5rem; font-size: 0.88rem; color: var(--muted); }
+  details.how summary { cursor: pointer; width: fit-content; }
+  .call { margin-top: 0.5rem; background: #fff; border: 1px solid var(--grout); border-radius: 8px; padding: 0.5rem 0.7rem; }
+  .call code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; color: var(--ink); overflow-wrap: anywhere; }
+  .call pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.74rem; max-height: 14rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.4rem; color: var(--muted); }
+
+  /* Composer */
+  .composer { position: fixed; left: 0; right: 0; bottom: 0; background: linear-gradient(transparent, var(--porcelain) 30%); padding: 1.4rem 1rem 1rem; }
+  .composer form { max-width: 760px; margin: 0 auto; display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; }
+  .composer input { font: inherit; padding: 0.8rem 0.9rem; border: 2px solid var(--grout); border-radius: 10px; background: var(--glaze); color: var(--ink); min-width: 0; }
+  .composer input:focus { border-color: var(--green); outline: none; }
+  button { font: inherit; font-weight: 800; border-radius: 10px; cursor: pointer; }
+  .send { background: var(--green); color: #fff; border: 2px solid var(--green); padding: 0 1.3rem; }
+  .send:disabled { opacity: 0.45; cursor: default; }
+  .choices { margin: 0; }
+  .choices .chip { text-align: left; }
+  .tools { max-width: 760px; margin: 0.5rem auto 0; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .chip { background: var(--glaze); color: var(--ink); border: 1px solid var(--grout); padding: 0.3rem 0.8rem; font-size: 0.88rem; font-weight: 600; }
+  .chip[aria-pressed="true"] { background: var(--green); color: #fff; border-color: var(--green); }
+
+
+  /* Falling background: purely decorative, behind all content, slow and faint */
+  #rain { position: fixed; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+  #rain span {
+    position: absolute; top: -3rem; left: var(--x); font-size: var(--s); opacity: 0.32;
+    animation: fall var(--d) linear var(--delay) infinite; will-change: transform;
+  }
+  @keyframes fall {
+    0%   { transform: translate(0, 0) rotate(var(--r0)); }
+    50%  { transform: translate(var(--sway), 55vh) rotate(calc(var(--r0) + 25deg)); }
+    100% { transform: translate(0, calc(100vh + 6rem)) rotate(calc(var(--r0) + 50deg)); }
+  }
+  .app, .composer { position: relative; z-index: 1; }
+  .composer { position: fixed; }
+
+  @media (prefers-reduced-motion: reduce) { #rain { display: none; } .thinking::after { animation: none; content: "..."; } }
+  @media (max-width: 480px) { .card { grid-template-columns: 3.7rem 1fr; } .tile b { font-size: 1.6rem; } }
+</style>
+</head>
+<body>
+<div id="rain" aria-hidden="true"></div>
+<main class="app">
+  <header class="plaque">
+    <h1>Flush Hour</h1>
+    <p>Finds public restrooms in New York City that are open when you get there.</p>
+  </header>
+
+  <section id="intro" class="panel" aria-labelledby="intro-title">
+    <h2 id="intro-title">Ask where to go</h2>
+    <p>Tell it where you are, or turn on your location. It searches the city's official list of about 1,000 public restrooms, checks their hours for the time you'd arrive, and can plan stops along a walk. Mention what you need (wheelchair access, a changing station, an all-gender restroom) and it remembers for the rest of the chat.</p>
+    <div class="examples">
+      <button class="example" type="button">I'm at Columbia University and need a wheelchair-accessible restroom with a changing station.</button>
+      <button class="example" type="button">I'm walking from Union Square to the Brooklyn Bridge. Where can I stop on the way?</button>
+      <button class="example" type="button">It’s 1am and I’m by Amity Hall. What’s actually open?</button>
+    </div>
+  </section>
+
+  <p id="needs" class="needs" aria-live="polite"></p>
+  <div id="feed" aria-live="polite"></div>
+</main>
+
+<div class="composer">
+  <form id="form" autocomplete="off">
+    <input id="q" type="text" placeholder="Where are you, and what do you need?" aria-label="Your message" />
+    <button id="send" class="send" type="submit">Send</button>
+  </form>
+  <div class="tools">
+    <button id="loc" class="chip" type="button" aria-pressed="false">Use my location</button>
+    <button id="reset" class="chip" type="button">Start over</button>
+  </div>
+</div>
+
+<script>
+  const feed = document.getElementById("feed");
+  const intro = document.getElementById("intro");
+  const form = document.getElementById("form");
+  const input = document.getElementById("q");
+  const sendBtn = document.getElementById("send");
+  const locBtn = document.getElementById("loc");
+  const resetBtn = document.getElementById("reset");
+  const needsEl = document.getElementById("needs");
+
+  let sessionId = null;
+  let locationOn = false;
+  let lastFix = null;
+
+  const NEED_LABEL = { wheelchair: "wheelchair access", changing_station: "a changing station", gender_neutral: "an all-gender restroom" };
+  const STATUS_LABEL = { open: "Open", closed: "Closed", unclear: "Not sure" };
+  const TIER_LABEL = {
+    official_but_hours_uncertain: "Official site, hours uncertain",
+    community_listed: "Community-listed",
+    openstreetmap: "OpenStreetMap",
+  };
+
+  // Everything from the server is inserted with textContent, never innerHTML.
+  function h(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function lock(status) {
+    const label = STATUS_LABEL[status];
+    if (!label) return null;
+    const pill = h("span", "lock " + status);
+    pill.appendChild(h("i"));
+    pill.appendChild(document.createTextNode(label));
+    return pill;
+  }
+
+  function accessTag(text) {
+    const t = (text || "").toLowerCase();
+    if (t.startsWith("fully")) return "Wheelchair accessible";
+    if (t.startsWith("partial") || t.startsWith("limited")) return "Partly accessible";
+    if (t === "not accessible") return "Not wheelchair accessible";
+    return null;
+  }
+
+  function tagsFor(r) {
+    const tags = [];
+    if (typeof r.accessibility === "string") { const a = accessTag(r.accessibility); if (a) tags.push(a); }
+    if (r.wheelchair === true) tags.push("Wheelchair accessible");
+    if (r.all_gender === true) tags.push("All-gender");
+    const ch = r.changing_station;
+    if (ch === true) tags.push("Changing station");
+    else if (typeof ch === "string" && ch.toLowerCase().startsWith("yes")) tags.push(ch.toLowerCase().includes("only") ? "Changing station (one restroom)" : "Changing station");
+    return tags;
+  }
+
+  function mapLink(url) {
+    if (typeof url !== "string" || !url.startsWith("https://www.google.com/maps/")) return null;
+    const a = h("a", "go", "Directions");
+    a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+    return a;
+  }
+
+  // kind: "near" | "route" | "fallback"
+  function card(r, kind) {
+    const el = h("article", "card");
+    const tile = h("div", "tile");
+    const minutes = kind === "route" ? r.minutes_into_walk : r.walk_min;
+    tile.appendChild(h("b", "", minutes ?? "?"));
+    tile.appendChild(h("span", "", kind === "route" ? "min into walk" : "min walk"));
+    el.appendChild(tile);
+
+    const body = h("div", "body");
+    body.appendChild(h("div", "name", r.name || "Restroom"));
+    const note = r.status_note || r.why_uncertain || r.caveat || r.address;
+    if (note) body.appendChild(h("div", "sub", note));
+    if (r.hours_that_day && r.hours_that_day !== "not listed") body.appendChild(h("div", "sub", "Hours that day: " + r.hours_that_day));
+
+    const row = h("div", "row");
+    const pill = lock(r.status);
+    if (pill) row.appendChild(pill);
+    if (r.tier) row.appendChild(h("span", "tag", TIER_LABEL[r.tier] + (r.confidence === "low" ? ", low confidence" : "")));
+    if (kind === "route" && r.extra_walk_min > 0) row.appendChild(h("span", "tag", "+" + r.extra_walk_min + " min detour"));
+    if (r.seasonal) row.appendChild(h("span", "tag", "Seasonal"));
+    for (const t of tagsFor(r)) row.appendChild(h("span", "tag", t));
+    if (r.listing_age_years >= 5) row.appendChild(h("span", "tag", "Listed " + r.listing_age_years + " years ago"));
+    if (r.unconfirmed_needs && r.unconfirmed_needs.length) row.appendChild(h("span", "tag", "Not confirmed: " + r.unconfirmed_needs.map(n => NEED_LABEL[n] || n).join(", ")));
+    const link = mapLink(r.map_link);
+    if (link) row.appendChild(link);
+    body.appendChild(row);
+    el.appendChild(body);
+    return el;
+  }
+
+  function detailCard(d) {
+    const el = h("article", "card");
+    const tile = h("div", "tile");
+    tile.appendChild(h("b", "", STATUS_LABEL[d.status] || "?"));
+    tile.appendChild(h("span", "", "at that time"));
+    el.appendChild(tile);
+    const body = h("div", "body");
+    body.appendChild(h("div", "name", d.name));
+    const sub = [d.status_note, d.next_open ? "Next opens " + d.next_open : null].filter(Boolean).join(". ");
+    if (sub) body.appendChild(h("div", "sub", sub));
+    const row = h("div", "row");
+    const pill = lock(d.status); if (pill) row.appendChild(pill);
+    const link = mapLink(d.map_link); if (link) row.appendChild(link);
+    body.appendChild(row);
+    if (d.weekly_hours) {
+      const week = h("div", "week");
+      for (const [day, hrs] of Object.entries(d.weekly_hours)) {
+        const line = h("div"); line.appendChild(h("span", "", day)); line.appendChild(h("span", "", hrs)); week.appendChild(line);
+      }
+      body.appendChild(week);
+    }
+    el.appendChild(body);
+    return el;
+  }
+
+  function renderCall(call) {
+    let data;
+    try { data = JSON.parse(call.result); } catch { return null; }
+    const box = h("section", "results");
+
+    if (data.error) { box.appendChild(h("div", "note", data.error)); return box; }
+
+    if (data.needs_clarification) {
+      box.appendChild(h("div", "results-head", "That name matches more than one place. Which one?"));
+      const choices = h("div", "tools choices");
+      for (const option of data.options || []) {
+        const b = h("button", "chip", option.label);
+        b.type = "button";
+        b.addEventListener("click", () => ask("I mean " + option.label + "."));
+        choices.appendChild(b);
+      }
+      box.appendChild(choices);
+      return box;
+    }
+
+    if (call.name === "remember_needs") { showNeeds(data.saved_needs || []); return null; }
+    if (call.name === "check_open_status") { box.appendChild(detailCard(data)); return box; }
+
+    const list = data.results || data.stops_in_walking_order || data.options || [];
+    const kind = call.name === "restrooms_along_route" ? "route" : call.name === "fallback_options" ? "fallback" : "near";
+    const head = data.route ? data.route + ", about " + data.walk_min_total + " min on foot" : data.searched_near ? "Near " + data.searched_near + ", " + data.at_time : "";
+    if (head) box.appendChild(h("div", "results-head", head));
+    for (const r of list) box.appendChild(card(r, kind));
+    if (!list.length) {
+      const radius = data.radius_m_searched ? " within " + data.radius_m_searched + " m" : "";
+      const empty = kind === "route" ? "No restroom near this route is open when you would pass it."
+        : kind === "fallback" ? "Nothing else found in range."
+        : "No official restroom" + radius + " is open at that time.";
+      box.appendChild(h("div", "note", empty));
+    }
+    if (data.widened_from_m) box.appendChild(h("div", "results-head", "Nothing was open within " + data.widened_from_m + " m, so I searched out to " + data.radius_m_searched + " m."));
+    if (data.nearest_closed) box.appendChild(h("div", "results-head", "Closest one that is closed: " + data.nearest_closed.name + " (" + data.nearest_closed.why + ")."));
+    if (kind === "route" && list.length) box.appendChild(h("div", "results-head", "Longest stretch without a stop: " + data.longest_stretch_without_a_stop_min + " min."));
+    for (const n of data.notes || []) box.appendChild(h("div", "note", n));
+    return box;
+  }
+
+  function showNeeds(needs) {
+    needsEl.textContent = "";
+    if (!needs.length) return;
+    needsEl.appendChild(document.createTextNode("Remembering for this chat: "));
+    needsEl.appendChild(h("b", "", needs.map(n => NEED_LABEL[n] || n).join(", ")));
+  }
+
+  function howItWorked(calls) {
+    const details = h("details", "how");
+    const names = [...new Set(calls.map(c => c.name))].join(", ");
+    details.appendChild(h("summary", "", "How I found this: " + calls.length + " tool call" + (calls.length === 1 ? "" : "s") + " (" + names + ")"));
+    for (const c of calls) {
+      const wrap = h("div", "call");
+      wrap.appendChild(h("code", "", c.name + "(" + JSON.stringify(c.args) + ")"));
+      let pretty = c.result;
+      try { pretty = JSON.stringify(JSON.parse(c.result), null, 2); } catch {}
+      wrap.appendChild(h("pre", "", pretty));
+      details.appendChild(wrap);
+    }
+    return details;
+  }
+
+  function getFix() {
+    return new Promise(resolve => {
+      if (!navigator.geolocation) return resolve(lastFix);
+      navigator.geolocation.getCurrentPosition(
+        p => { lastFix = p.coords.latitude.toFixed(5) + "," + p.coords.longitude.toFixed(5); resolve(lastFix); },
+        () => resolve(lastFix),
+        { enableHighAccuracy: false, timeout: 4000, maximumAge: 60000 },
+      );
+    });
+  }
+
+  async function ask(text) {
+    if (!text) return;
+    intro.hidden = true;
+    sendBtn.disabled = true;
+    input.value = "";
+
+    let outgoing = text;
+    const you = h("div", "turn-you", text);
+    if (locationOn) {
+      const fix = await getFix();
+      if (fix) { outgoing += "\n[my GPS location: " + fix + "]"; you.appendChild(h("small", "", "with your location")); }
+    }
+    feed.appendChild(you);
+    const bot = h("div", "turn-bot");
+    const textEl = h("div", "text thinking", "Checking the city's data");
+    bot.appendChild(textEl);
+    feed.appendChild(bot);
+    bot.scrollIntoView({ block: "end", behavior: "smooth" });
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: outgoing, session_id: sessionId }),
+      });
+      const data = await res.json();
+      sessionId = data.session_id;
+      textEl.classList.remove("thinking");
+      textEl.textContent = data.response;
+      for (const call of data.tool_calls || []) {
+        const rendered = renderCall(call);
+        if (rendered) bot.appendChild(rendered);
+      }
+      if ((data.tool_calls || []).length) bot.appendChild(howItWorked(data.tool_calls));
+    } catch (e) {
+      textEl.classList.remove("thinking");
+      textEl.textContent = "Couldn't reach the server (" + e.message + "). Check your connection and send that again.";
+    }
+    sendBtn.disabled = false;
+    bot.scrollIntoView({ block: "end", behavior: "smooth" });
+    input.focus();
+  }
+
+  form.addEventListener("submit", e => { e.preventDefault(); ask(input.value.trim()); });
+  document.querySelectorAll(".example").forEach(b => b.addEventListener("click", () => ask(b.textContent)));
+
+  locBtn.addEventListener("click", async () => {
+    locationOn = !locationOn;
+    locBtn.setAttribute("aria-pressed", String(locationOn));
+    locBtn.textContent = locationOn ? "Using my location" : "Use my location";
+    if (locationOn && !(await getFix())) {
+      locationOn = false;
+      locBtn.setAttribute("aria-pressed", "false");
+      locBtn.textContent = "Use my location";
+      needsEl.textContent = "Location is blocked in this browser. Allow it for this site, or type an address or cross street instead.";
+    }
+  });
+
+  resetBtn.addEventListener("click", async () => {
+    if (sessionId) await fetch("/clear?session_id=" + encodeURIComponent(sessionId), { method: "POST" });
+    sessionId = null;
+    feed.textContent = "";
+    showNeeds([]);
+    intro.hidden = false;
+    input.focus();
+  });
+
+  // Decorative falling emoji. Positions, sizes and speeds are spread out so it never looks like a grid.
+  (function () {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const rain = document.getElementById("rain");
+    const count = window.innerWidth < 600 ? 9 : 16;
+    for (let i = 0; i < count; i++) {
+      const p = document.createElement("span");
+      p.textContent = "\u{1F4A9}";
+      p.style.setProperty("--x", ((i + Math.random() * 0.8) / count * 100).toFixed(1) + "%");
+      p.style.setProperty("--s", (1.3 + Math.random() * 1.6).toFixed(2) + "rem");
+      p.style.setProperty("--d", (28 + Math.random() * 26).toFixed(1) + "s");        // 28-54 s to cross the screen
+      p.style.setProperty("--delay", (-Math.random() * 54).toFixed(1) + "s");        // negative: already mid-fall on load
+      p.style.setProperty("--sway", ((Math.random() - 0.5) * 70).toFixed(0) + "px");
+      p.style.setProperty("--r0", ((Math.random() - 0.5) * 60).toFixed(0) + "deg");
+      rain.appendChild(p);
+    }
+  })();
+
+  input.focus();
+</script>
+</body>
 </html>
