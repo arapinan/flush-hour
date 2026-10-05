@@ -124,6 +124,17 @@ def test_errors():
     assert "ISO 8601" in call("find_restrooms", location="Columbia", when="next tuesday-ish")["error"]
     assert "Unknown tool" in call("teleport")["error"]
     assert "Bad arguments" in call("find_restrooms", bogus=1)["error"]
+    assert "Unknown restroom_id" in call("check_open_status", restroom_id="nyc-deadbeef")["error"]
+    assert "do not include hours" in call("check_open_status", restroom_id="refuge-3653")["error"]
+
+
+def test_check_open_status():
+    lib = next(r for r in call("find_restrooms", location="Columbia", when="2026-10-05T11:00")["results"]
+               if r["name"] == "Morningside Library")
+    sunday_night = call("check_open_status", restroom_id=lib["id"], when="2026-10-04T21:15")
+    assert sunday_night["status"] == "closed" and sunday_night["next_open"] == "Monday at 10 AM"
+    assert sunday_night["weekly_hours"]["Sun"] == "Closed" and sunday_night["weekly_hours"]["Mon"] == "10 AM – 6 PM"
+    assert call("check_open_status", restroom_id=lib["id"], when="2026-10-05T12:00")["status"] == "open"
 
 
 def test_route():
@@ -156,6 +167,6 @@ def test_fallback():
 
 
 if __name__ == "__main__":
-    for fn in (test_find, test_radius_widening, test_needs_and_session_memory, test_errors, test_route, test_fallback):
+    for fn in (test_find, test_radius_widening, test_needs_and_session_memory, test_errors, test_check_open_status, test_route, test_fallback):
         fn()
         print("ok", fn.__name__)

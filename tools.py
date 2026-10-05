@@ -31,7 +31,7 @@ from geo import (
     route_position,
     walk_minutes,
 )
-from hours import availability, hours_for_day
+from hours import availability, hours_for_day, next_open
 
 NYC_TZ = ZoneInfo("America/New_York")
 HEADERS = {"User-Agent": "flush-hour-class-project/0.1 (Columbia IEOR 4570 student assignment)"}
@@ -382,6 +382,42 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     return out
 
 
+# --- check_open_status ---
+
+
+def check_open_status(state: dict, restroom_id: str, when: str | None = None) -> dict:
+    when_dt = _parse_when(when)
+    if restroom_id.startswith("refuge-") or restroom_id.startswith("osm-"):
+        raise ToolError("Community and OpenStreetMap listings do not include hours. Only ids starting 'nyc-' can be checked.")
+    site = next((s for s in nyc_sites() if s["id"] == restroom_id), None)
+    if not site:
+        raise ToolError(
+            f"Unknown restroom_id '{restroom_id}'. Ids come from earlier find_restrooms or "
+            "restrooms_along_route results; call one of those first."
+        )
+    row = site["row"]
+    verdict = availability(row, when_dt)
+    out = {
+        "id": site["id"],
+        "name": site["name"],
+        "checked_for": when_dt.strftime("%A %Y-%m-%d %H:%M") + " (NYC time)",
+        "status": verdict["state"],
+        "status_note": verdict["reason"],
+        "city_status": row.get("status") or "not listed",
+        "season": row.get("open") or "not listed",
+        "weekly_hours": {d: hours_for_day(row.get("hours_of_operation"), i)
+                         for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])},
+        "map_link": _maps_link(site["point"]),
+    }
+    if verdict["state"] != "open":
+        reopening = next_open(row.get("hours_of_operation"), when_dt)
+        if reopening and verdict["state"] == "closed":
+            out["next_open"] = reopening
+    if verdict["state"] == "unclear":
+        out["advice"] = "Tell the user the hours are uncertain and suggest a backup (find_restrooms or fallback_options)."
+    return out
+
+
 # --- fallback_options ---
 
 
@@ -573,6 +609,18 @@ TOOLS = [
         }, "required": ["start", "end"]},
     }},
     {"type": "function", "function": {
+        "name": "check_open_status",
+        "description": (
+            "Check whether one specific official restroom is open at a given time, with its weekly hours and next "
+            "opening time. Use to follow up on a restroom already returned by find_restrooms or "
+            "restrooms_along_route (e.g. 'will that one be open at 9pm?'). Not for discovering restrooms."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "restroom_id": {"type": "string", "description": "The `id` of a restroom from an earlier tool result, e.g. 'nyc-3fa91c2b'. Must start with 'nyc-'."},
+            "when": _WHEN,
+        }, "required": ["restroom_id"]},
+    }},
+    {"type": "function", "function": {
         "name": "fallback_options",
         "description": (
             "Last-resort places to try when find_restrooms has nothing open or suitable: official sites whose hours "
@@ -592,6 +640,7 @@ TOOLS = [
 TOOL_MAP = {
     "find_restrooms": find_restrooms,
     "restrooms_along_route": restrooms_along_route,
+    "check_open_status": check_open_status,
     "fallback_options": fallback_options,
 }
 
