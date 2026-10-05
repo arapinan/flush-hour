@@ -1,6 +1,8 @@
 import json
 import uuid
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import litellm
 import uvicorn
@@ -12,19 +14,35 @@ from tools import TOOLS, run_tool
 
 # --- Config ---
 
-SYSTEM_PROMPT = (
-    "You are a helpful assistant. When a question depends on the weather or "
-    "outdoor conditions, call get_weather first, then answer in a sentence."
-)
-MAX_TOOL_ROUNDS = 5
+NYC_TZ = ZoneInfo("America/New_York")
+MAX_TOOL_ROUNDS = 6
+
+SYSTEM_PROMPT = """You are Flush Hour, a dry, quick-witted New Yorker who knows where every public restroom in the five boroughs is, and which ones are actually open. People come to you in a hurry, so be brief and practical.
+
+You have tools backed by real city data. NEVER name a restroom from memory; every restroom you mention must come from a tool result.
+
+Which tool, when:
+- "Nearest / where can I find a restroom": find_restrooms.
+
+Rules:
+- Pass the user's place name as they wrote it; the tool looks up addresses, intersections and landmarks. If a tool says it could not find a place, ask the user for a nearby address or cross street. Write intersections with full street names, e.g. 'Amsterdam Avenue & West 116th Street'.
+- If you do not know where the user is, ask one short question. If their message contains "[my GPS location: lat,lon]", use those coordinates as the location.
+- Every user message ends with a system note giving the current NYC time. Use it to turn "now", "tonight", "tomorrow morning" into an ISO 8601 `when` such as 2026-10-05T01:00. Omit `when` for "right now".
+- Distances: leave `radius_m` out unless the user gave one; the tool widens by itself. If they did ("within 5 blocks"), convert (a short block is about 80 m, an avenue block about 270 m). When nothing is found, say how far you searched and offer to look further.
+- Lead with the single best option: name, walking minutes, and whether it is open (and until when). Offer at most two backups unless asked for more.
+- Be honest about uncertainty. If status is "unclear", say why in plain words. Walking times are estimates.
+- If a tool returns an error, use its advice: fix the argument and retry once, or tell the user plainly what is unavailable. Never invent a result.
+- Do not paste URLs; the page shows map buttons from tool results. Plain text, no markdown tables, no more than a few short sentences.
+- Politely decline anything unrelated to finding a restroom in NYC."""
 
 # --- The Harness ---
 
 
-def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
+def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
     """Complete until the model answers without asking for a tool.
 
-    Returns the final text and a record of every tool call made along the way.
+    `state` is this session's meta state (remembered needs). It is passed to the tools,
+    not shown to the model. Returns the final text and every tool call made along the way.
     """
     tool_calls = []
 
@@ -36,29 +54,29 @@ def run_agent(messages: list[dict]) -> tuple[str, list[dict]]:
             tools=TOOLS,
         ).choices[0].message
 
-        # Append assistant's reply (text, tool calls, or both) to the context.
         # model_dump() keeps it a plain dict: the raw object carries provider-specific
         # fields that trip Pydantic when LiteLLM re-serializes it next round.
         messages += [reply.model_dump()]
 
         if not reply.tool_calls:
-            return reply.content, tool_calls
+            return reply.content or "", tool_calls
 
         # The harness, not the model, runs each tool and appends the result
         for call in reply.tool_calls:
             args = json.loads(call.function.arguments)
-            result = run_tool(call.function.name, args)
+            result = run_tool(call.function.name, args, state)
             tool_calls += [{"name": call.function.name, "args": args, "result": result}]
 
             messages += [{"role": "tool", "tool_call_id": call.id, "content": result}]
 
-    return "Sorry, I hit my tool-call limit before finishing.", tool_calls
+    return "Sorry, I hit my tool-call limit before finishing. Try asking in a simpler way.", tool_calls
 
 
 # --- Session Store ---
 
-# session_id -> list of messages. In-memory, single process.
+# session_id -> list of messages (LLM context), and session_id -> meta state. In-memory, single process.
 sessions: dict[str, list] = {}
+session_state: dict[str, dict] = {}
 
 # --- FastAPI App ---
 
@@ -87,12 +105,14 @@ def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     if session_id not in sessions:
         sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        session_state[session_id] = {}
 
-    # Append user's message to the context
-    sessions[session_id] += [{"role": "user", "content": request.message}]
+    # The model has no clock, so stamp each user turn with the current NYC time
+    now = datetime.now(NYC_TZ).strftime("%A %Y-%m-%d %H:%M")
+    sessions[session_id] += [{"role": "user", "content": f"{request.message}\n\n[system note: current NYC time is {now}]"}]
 
     try:
-        response, tool_calls = run_agent(sessions[session_id])
+        response, tool_calls = run_agent(sessions[session_id], session_state[session_id])
     except Exception as e:
         # Auth, billing, a model that is not running: show it in the chat, not as a 500.
         response, tool_calls = f"Model call failed: {type(e).__name__}: {str(e)[:300]}", []
@@ -103,6 +123,7 @@ def chat(request: ChatRequest):
 @app.post("/clear")
 def clear(session_id: str | None = None):
     sessions.pop(session_id, None)
+    session_state.pop(session_id, None)
     return {"status": "ok"}
 
 
