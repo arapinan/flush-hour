@@ -3,6 +3,8 @@
 Data sources (all free, no API key):
   - NYC Open Data "Public Restrooms" (official, ~1,000 sites, has hours)
   - NYC Planning Labs GeoSearch (address -> coordinates)
+  - Refuge Restrooms (community-submitted listings; can be old)
+  - OpenStreetMap via Overpass (best effort: public servers time out often)
 
 Design rules from the tool-calling lecture:
   * descriptions say what a tool is for AND when not to use it
@@ -36,8 +38,14 @@ HEADERS = {"User-Agent": "flush-hour-class-project/0.1 (Columbia IEOR 4570 stude
 
 RESTROOMS_URL = "https://data.cityofnewyork.us/resource/i7jb-7jku.json"
 GEOSEARCH_URL = "https://geosearch.planninglabs.nyc/v2/search"
+REFUGE_URL = "https://www.refugerestrooms.org/api/v1/restrooms/by_location"
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
 
 NEEDS = ["wheelchair", "changing_station", "gender_neutral"]
+DUPLICATE_RADIUS_M = 40
 DEFAULT_RADIUS_M = 800
 WIDENED_RADIUS_M = 2000
 
@@ -63,6 +71,12 @@ def _cached(key: str, ttl_seconds: int, fn):
 
 def _get_json(url: str, params: dict | None = None, timeout: int = 10):
     response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+
+def _post_json(url: str, data: dict, timeout: int = 9):
+    response = requests.post(url, data=data, headers=HEADERS, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
@@ -293,12 +307,12 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
         if closed:
             out["message"] = (
                 f"No official restroom within {radius_m} m is open at that time{needs_text}; {len(closed)} nearby are closed then. "
-                "A bigger radius is unlikely to help at this hour; tell the user the radius you searched."
+                "A bigger radius is unlikely to help at this hour. Call fallback_options now, and tell the user the radius you searched."
             )
         else:
             out["message"] = (
                 f"No official restroom within {radius_m} m is open at that time{needs_text}. "
-                "Retry with a larger radius_m (up to 3000) if the user is happy to walk further."
+                "Call fallback_options, or retry with a larger radius_m (up to 3000) if the user is happy to walk further."
             )
     return out
 
@@ -363,8 +377,143 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     if not stops:
         out["message"] = (
             f"No official restroom within {max_detour_m} m of the route is open when you would pass it. "
-            "Try a larger max_detour_m (up to 1500)."
+            "Try a larger max_detour_m (up to 1500) or call fallback_options near the middle of the route."
         )
+    return out
+
+
+# --- fallback_options ---
+
+
+def _refuge_near(origin: tuple[float, float], per_page: int = 30) -> list[dict]:
+    year = datetime.now().year
+    out = []
+    for r in _get_json(REFUGE_URL, {"lat": origin[0], "lng": origin[1], "per_page": per_page}):
+        if r.get("approved") is False or r.get("latitude") is None or r.get("longitude") is None:
+            continue
+        updated = (r.get("updated_at") or "")[:4]
+        out.append({
+            "id": f"refuge-{r['id']}",
+            "name": (r.get("name") or "Unnamed place").strip(),
+            "address": ", ".join(p for p in (r.get("street"), r.get("city")) if p),
+            "point": (float(r["latitude"]), float(r["longitude"])),
+            "wheelchair": bool(r.get("accessible")),
+            "all_gender": bool(r.get("unisex")),
+            "changing_station": bool(r.get("changing_table")),
+            "upvotes": r.get("upvote") or 0,
+            "downvotes": r.get("downvote") or 0,
+            "listing_age_years": (year - int(updated)) if updated.isdigit() else None,
+            "directions": (r.get("directions") or "").replace("\r", " ").strip()[:160],
+        })
+    return out
+
+
+def _osm_toilets(origin: tuple[float, float], radius_m: int) -> list[dict]:
+    lat, lon = origin
+    query = (
+        f'[out:json][timeout:8];(node["amenity"="toilets"](around:{radius_m},{lat},{lon});'
+        f'way["amenity"="toilets"](around:{radius_m},{lat},{lon}););out center 25;'
+    )
+    last_error: Exception | None = None
+    for url in OVERPASS_URLS:
+        try:
+            elements = _post_json(url, {"data": query}).get("elements", [])
+            break
+        except (requests.RequestException, ValueError) as e:
+            last_error = e
+    else:
+        raise requests.RequestException(f"OpenStreetMap servers did not respond ({last_error})")
+    out = []
+    for el in elements:
+        tags = el.get("tags", {})
+        point = (el.get("lat"), el.get("lon")) if "lat" in el else (el.get("center", {}).get("lat"), el.get("center", {}).get("lon"))
+        if None in point or tags.get("access") in ("private", "no"):
+            continue
+        out.append({
+            "id": f"osm-{el['id']}",
+            "name": tags.get("name") or "Unnamed toilets (OpenStreetMap)",
+            "point": point,
+            "wheelchair": tags.get("wheelchair") == "yes",
+            "access": tags.get("access", "not stated"),
+            "fee": tags.get("fee", "not stated"),
+            "hours_raw": tags.get("opening_hours"),
+        })
+    return out
+
+
+def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int = 6) -> dict:
+    origin, label = geocode(location)
+    when_dt = _parse_when(when)
+    radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, 10, 6)
+    notes: list[str] = []
+    options: list[dict] = []
+    official_points, confirmed_open = [], 0
+
+    for site in nyc_sites():
+        if haversine_m(origin, site["point"]) > radius_m:
+            continue
+        verdict = availability(site["row"], when_dt)
+        if verdict["state"] == "open":
+            confirmed_open += 1
+        official_points.append(site["point"])
+        if verdict["state"] == "unclear":
+            options.append({
+                "tier": "official_but_hours_uncertain", "confidence": "medium",
+                "id": site["id"], "name": site["name"], "walk_min": walk_minutes(grid_distance_m(origin, site["point"])),
+                "why_uncertain": verdict["reason"], "map_link": _maps_link(site["point"]),
+            })
+
+    def near_official(point):
+        return any(haversine_m(point, p) < DUPLICATE_RADIUS_M for p in official_points)
+
+    seen_points = []
+    try:
+        for r in _refuge_near(origin):
+            if haversine_m(origin, r["point"]) > radius_m or near_official(r["point"]):
+                continue
+            old = r["listing_age_years"] is not None and r["listing_age_years"] >= 5
+            disliked = r["downvotes"] > r["upvotes"]
+            options.append({
+                "tier": "community_listed", "confidence": "low" if (old or disliked) else "medium",
+                "id": r["id"], "name": r["name"], "address": r["address"],
+                "walk_min": walk_minutes(grid_distance_m(origin, r["point"])),
+                "wheelchair": r["wheelchair"], "all_gender": r["all_gender"], "changing_station": r["changing_station"],
+                "community_votes": f"{r['upvotes']} up / {r['downvotes']} down",
+                "listing_age_years": r["listing_age_years"],
+                "caveat": "Listed by volunteers; hours unknown and may be for customers only.",
+                "map_link": _maps_link(r["point"]),
+            })
+            seen_points.append(r["point"])
+    except requests.RequestException:
+        notes.append("Refuge Restrooms (community listings) did not respond, so those are missing.")
+
+    try:
+        for o in _osm_toilets(origin, radius_m):
+            if near_official(o["point"]) or any(haversine_m(o["point"], p) < DUPLICATE_RADIUS_M for p in seen_points):
+                continue
+            options.append({
+                "tier": "openstreetmap", "confidence": "low", "id": o["id"], "name": o["name"],
+                "walk_min": walk_minutes(grid_distance_m(origin, o["point"])),
+                "access": o["access"], "fee": o["fee"], "wheelchair": o["wheelchair"],
+                "hours_raw": o["hours_raw"], "map_link": _maps_link(o["point"]),
+            })
+    except requests.RequestException:
+        notes.append("OpenStreetMap did not respond (its public servers are often busy), so those are missing.")
+
+    tier_rank = {"official_but_hours_uncertain": 0, "community_listed": 1, "openstreetmap": 2}
+    conf_rank = {"medium": 0, "low": 1}
+    options.sort(key=lambda o: (tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
+    out = {
+        "searched_near": label,
+        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " (NYC time)",
+        "official_sites_confirmed_open_nearby": confirmed_open,
+        "options": options[:limit],
+        "notes": notes,
+    }
+    if confirmed_open:
+        out["hint"] = f"{confirmed_open} official site(s) in range are confirmed open; find_restrooms lists them with details."
+    if not options:
+        out["message"] = "Nothing found in range. Try a larger radius_m (up to 2000), or a different time."
     return out
 
 
@@ -395,7 +544,8 @@ TOOLS = [
         "description": (
             "Find official NYC public restrooms (parks, libraries, plazas) near a place, ranked by estimated "
             "walking time, skipping sites that are closed at the requested time. Use for any 'nearest restroom / "
-            "bathroom / toilet' question. Not for walking routes (use restrooms_along_route)."
+            "bathroom / toilet' question. Not for walking routes (use restrooms_along_route) and does not include "
+            "businesses (use fallback_options when nothing suitable is open)."
         ),
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": _LOCATION},
@@ -422,11 +572,27 @@ TOOLS = [
             "limit": {"type": "integer", "description": "Max stops, 1-8. Default 5."},
         }, "required": ["start", "end"]},
     }},
+    {"type": "function", "function": {
+        "name": "fallback_options",
+        "description": (
+            "Last-resort places to try when find_restrooms has nothing open or suitable: official sites whose hours "
+            "are uncertain, volunteer-listed restrooms in businesses and campus buildings (with listing age and "
+            "votes), and OpenStreetMap toilets. Each option carries a confidence and caveat; be honest with the "
+            "user that these are less reliable. Call find_restrooms first."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "location": {"type": "string", "description": _LOCATION},
+            "when": _WHEN,
+            "radius_m": {"type": "integer", "description": "Search radius in meters, 200-2000. Default 1000."},
+            "limit": {"type": "integer", "description": "Max options, 1-10. Default 6."},
+        }, "required": ["location"]},
+    }},
 ]
 
 TOOL_MAP = {
     "find_restrooms": find_restrooms,
     "restrooms_along_route": restrooms_along_route,
+    "fallback_options": fallback_options,
 }
 
 

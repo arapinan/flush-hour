@@ -3,6 +3,8 @@ real API responses. Run: python3 test_tools.py
 """
 import json
 
+import requests
+
 import tools
 
 COLUMBIA = (40.8075, -73.9626)
@@ -33,9 +35,26 @@ ROWS = [
     row("Midtown Plaza", 40.7685, -73.9769, hours_of_operation="24 Hours"),
     {"facility_name": "No coordinates", "status": "Operational"},
 ]
+REFUGE = [
+    {"id": 3653, "name": "Columbia's Morningside Campus", "street": "Broadway and 116th Street", "city": "Manhattan",
+     "accessible": True, "unisex": True, "directions": "Several buildings on campus", "latitude": 40.80806,
+     "longitude": -73.963989, "updated_at": "2014-02-02T20:54:21.316Z", "downvote": 1, "upvote": 2,
+     "changing_table": False, "approved": True},
+    {"id": 30731, "name": "Arts and Crafts Beer Parlor", "street": "1135 Amsterdam Ave", "city": "New York",
+     "accessible": True, "unisex": False, "directions": "", "latitude": 40.8065685, "longitude": -73.9610072,
+     "updated_at": "2017-02-26T20:09:54.014Z", "downvote": 0, "upvote": 2, "changing_table": False, "approved": True},
+    {"id": 99999, "name": "Same spot as Anibal Aviles", "latitude": 40.80120, "longitude": -73.96281,
+     "updated_at": "2024-01-01T00:00:00Z", "upvote": 1, "downvote": 0, "approved": True},
+]
+
+CALLS = {"osm_fails": True}
+
+
 def fake_get(url, params=None, timeout=10):
     if url == tools.RESTROOMS_URL:
         return ROWS
+    if url == tools.REFUGE_URL:
+        return REFUGE
     if url == tools.GEOSEARCH_URL:
         text = params["text"].lower()
         if "nowhere" in text:
@@ -45,7 +64,14 @@ def fake_get(url, params=None, timeout=10):
     raise AssertionError(url)
 
 
-tools._get_json = fake_get
+def fake_post(url, data, timeout=9):
+    if CALLS["osm_fails"]:
+        raise requests.ConnectionError("504")
+    return {"elements": [{"id": 5, "lat": 40.8076, "lon": -73.9628, "tags": {"name": "Pier toilets", "access": "yes"}},
+                         {"id": 6, "lat": 40.8077, "lon": -73.9629, "tags": {"access": "private"}}]}
+
+
+tools._get_json, tools._post_json = fake_get, fake_post
 
 
 def call(name, state=None, **args):
@@ -75,10 +101,10 @@ def test_radius_widening():
     assert [r["name"] for r in out["results"]] == ["Midtown Plaza"]
     exact = call("find_restrooms", location=far, radius_m=800, when="2026-10-05T11:00")  # explicit distance is respected
     assert exact["results"] == [] and "widened_from_m" not in exact and exact["radius_m_searched"] == 800
-    assert "larger radius_m" in exact["message"]
+    assert "fallback_options" in exact["message"]
     night = call("find_restrooms", location="Broadway & 116th St", needs=["gender_neutral"], when="2026-10-05T01:00")  # only the library qualifies, and it is shut at 1am
     assert night["results"] == [] and night["closed_nearby_omitted"] > 0
-    assert "unlikely to help" in night["message"]
+    assert "unlikely to help" in night["message"] and "fallback_options" in night["message"]
 
 
 def test_needs_and_session_memory():
@@ -114,7 +140,22 @@ def test_route():
     assert "within a couple of minutes" in call("restrooms_along_route", start="Columbia", end="Columbia")["error"]
 
 
+def test_fallback():
+    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")   # 1 AM Monday
+    tiers = [o["tier"] for o in out["options"]]
+    assert "community_listed" in tiers
+    assert "Same spot as Anibal Aviles" not in [o["name"] for o in out["options"]]  # duplicate of an official site
+    assert any("OpenStreetMap" in n for n in out["notes"])                           # soft failure noted
+    old = next(o for o in out["options"] if o["name"].startswith("Columbia's"))
+    assert old["confidence"] == "low" and old["listing_age_years"] >= 10
+    CALLS["osm_fails"] = False
+    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    osm = [o for o in out["options"] if o["tier"] == "openstreetmap"]
+    assert [o["name"] for o in osm] == ["Pier toilets"]                              # private one filtered out
+    CALLS["osm_fails"] = True
+
+
 if __name__ == "__main__":
-    for fn in (test_find, test_radius_widening, test_needs_and_session_memory, test_errors, test_route):
+    for fn in (test_find, test_radius_widening, test_needs_and_session_memory, test_errors, test_route, test_fallback):
         fn()
         print("ok", fn.__name__)
