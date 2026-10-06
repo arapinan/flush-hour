@@ -89,8 +89,16 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
 
         # The harness, not the model, runs each tool and appends the result
         for call in reply.tool_calls:
-            args = json.loads(call.function.arguments)
-            result = run_tool(call.function.name, args, state)
+            # Every tool call gets a result, even unreadable arguments: the model can retry,
+            # and the history never holds a tool call with no answer
+            try:
+                args = json.loads(call.function.arguments or "{}")
+                result = run_tool(call.function.name, args, state)
+            except json.JSONDecodeError:
+                args = {}
+                result = json.dumps({"error": (
+                    "Arguments were not valid JSON. Retry with a JSON object matching the tool's parameters."
+                )})
             # Recorded for the /chat response, so the page can show its work
             tool_calls += [{"name": call.function.name, "args": args, "result": result}]
 

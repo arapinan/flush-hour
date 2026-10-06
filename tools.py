@@ -16,6 +16,7 @@ Design rules from the tool-calling lecture:
 """
 
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -128,6 +129,11 @@ def _parse_when(when: str | None) -> datetime:
     if parsed.tzinfo:  # a time with a UTC offset: convert it to the NYC wall clock
         parsed = parsed.astimezone(NYC_TZ).replace(tzinfo=None)
     return parsed
+
+
+def _nyc_time_label(dt: datetime, fmt: str = "%A %Y-%m-%d %H:%M") -> str:
+    """Format a naive NYC time with the zone in effect on that date: EDT in summer, EST in winter."""
+    return dt.replace(tzinfo=NYC_TZ).strftime(fmt + " %Z")
 
 
 def _resolve_needs(state: dict, needs: list | None) -> list[str]:
@@ -551,7 +557,7 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
 
     out = {
         "searched_near": label,
-        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
+        "at_time": _nyc_time_label(when_dt),
         "radius_m_searched": radius_m,
         "needs_applied": needs,
         "walk_times": "estimates along Manhattan's street grid, ~80 m/min",
@@ -638,7 +644,7 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     out = {
         "route": f"{start_label} → {end_label}",
         "walk_min_total": total_min,
-        "leaving_at": when_dt.strftime("%A %H:%M") + " EST",
+        "leaving_at": _nyc_time_label(when_dt, "%A %H:%M"),
         "needs_applied": needs,
         "stops_in_walking_order": stops,
         "longest_stretch_without_a_stop_min": int(round(longest_gap)),
@@ -659,11 +665,11 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
 def check_open_status(state: dict, restroom_id: str, when: str | None = None) -> dict:
     """Status at `when`, the weekly hours and the next opening time for one official restroom."""
     when_dt = _parse_when(when)
-    # Ids from fallback_options name another data source; say why instead of "unknown id"
+    # Ids from fallback_options name another data source; point the model at the hours it already has
     if restroom_id.startswith("refuge-") or restroom_id.startswith("osm-"):
         raise ToolError(
-            "Community and OpenStreetMap listings do not include hours. "
-            "Only ids starting 'nyc-' can be checked."
+            "check_open_status only covers official restrooms (ids starting 'nyc-'). For this listing, use "
+            "the `hours_raw` from the earlier fallback_options result and compare it to the requested time."
         )
     site = next((s for s in nyc_sites() if s["id"] == restroom_id), None)
     if not site:
@@ -676,7 +682,7 @@ def check_open_status(state: dict, restroom_id: str, when: str | None = None) ->
     out = {
         "id": site["id"],
         "name": site["name"],
-        "checked_for": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
+        "checked_for": _nyc_time_label(when_dt),
         "status": verdict["state"],
         "status_note": verdict["reason"],
         "city_status": row.get("status") or "not listed",
@@ -919,7 +925,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     options.sort(key=lambda o: (tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
     out = {
         "searched_near": label,
-        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
+        "at_time": _nyc_time_label(when_dt),
         "official_sites_confirmed_open_nearby": confirmed_open,
         "options": options[:limit],
     }
@@ -1069,15 +1075,20 @@ def run_tool(name: str, args: dict, state: dict) -> str:
     """
     if name not in TOOL_MAP:
         return json.dumps({"error": f"Unknown tool '{name}'. Available: {list(TOOL_MAP)}"})
+    fn = TOOL_MAP[name]
+    # Check the arguments against the signature first, so only a missing or made-up
+    # argument is reported as one (a TypeError from a bug inside the tool is not)
+    try:
+        inspect.signature(fn).bind(state, **args)
+    except TypeError as e:
+        return json.dumps({"error": f"Bad arguments for {name}: {e}. Check the tool's parameter list."})
     # Every outcome, good or bad, goes back to the model as JSON it can act on
     try:
-        return json.dumps(TOOL_MAP[name](state, **args), ensure_ascii=False)
+        return json.dumps(fn(state, **args), ensure_ascii=False)
     except NeedsClarification as e:  # not an error: a question for the model to pass on
         return json.dumps(e.payload, ensure_ascii=False)
     except ToolError as e:  # the message already says how to fix the call
         return json.dumps({"error": str(e)})
-    except TypeError as e:  # a missing or made-up argument
-        return json.dumps({"error": f"Bad arguments for {name}: {e}. Check the tool's parameter list."})
     except requests.RequestException as e:  # a data source timed out or failed
         return json.dumps({"error": (
             f"A city data service did not respond ({type(e).__name__}). Wait a moment and retry once; "

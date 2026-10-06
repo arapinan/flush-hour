@@ -333,7 +333,44 @@ def test_errors():
     assert "Unknown tool" in call("teleport")["error"]
     assert "Bad arguments" in call("find_restrooms", bogus=1)["error"]
     assert "Unknown restroom_id" in call("check_open_status", restroom_id="nyc-deadbeef")["error"]
-    assert "do not include hours" in call("check_open_status", restroom_id="refuge-3653")["error"]
+    assert "hours_raw" in call("check_open_status", restroom_id="refuge-3653")["error"]
+
+
+def test_bug_inside_tool_is_not_bad_arguments():
+    """A TypeError raised inside a tool is a bug, not the model's fault: no 'Bad arguments' advice."""
+    def broken(state, location):
+        return None + 1
+
+    tools.TOOL_MAP["broken"] = broken
+    try:
+        err = call("broken", location="Columbia")["error"]
+        assert "Unexpected problem" in err and "Bad arguments" not in err, err
+        assert "Bad arguments" in call("broken", where="Columbia")["error"]
+    finally:
+        del tools.TOOL_MAP["broken"]
+
+
+def test_unreadable_arguments():
+    """Bad JSON arguments get an error result the model can retry from, not a crashed turn."""
+    from types import SimpleNamespace
+    import app
+
+    def reply(content=None, calls=()):
+        tool_calls = [SimpleNamespace(id=f"c{i}", function=SimpleNamespace(name=n, arguments=a)) for i, (n, a) in enumerate(calls)]
+        msg = SimpleNamespace(content=content, tool_calls=tool_calls or None)
+        msg.model_dump = lambda: {"role": "assistant", "content": content}
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    replies = iter([reply(calls=[("remember_needs", '{"needs": ["wheelch')]), reply("Which needs?")])
+    original = app._complete_with_retry
+    app._complete_with_retry = lambda messages: next(replies)
+    try:
+        messages = []
+        text, calls = app.run_agent(messages, {})
+    finally:
+        app._complete_with_retry = original
+    assert text == "Which needs?" and calls[0]["args"] == {} and "not valid JSON" in calls[0]["result"]
+    assert messages[1]["role"] == "tool" and messages[1]["tool_call_id"] == "c0"  # the call still got an answer
 
 
 def test_check_open_status():
@@ -400,6 +437,6 @@ def test_fallback():
 
 
 if __name__ == "__main__":
-    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_check_open_status, test_route, test_fallback):
+    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback):
         fn()
         print("ok", fn.__name__)
