@@ -15,6 +15,8 @@ QUERIES = [
     "Brooklyn Bridge",
     "Astor Place",
     "Amity Hall",
+    "Metropolitan Museum of Art",
+    "the Met",
     "Broadway",
     "Broadway & 116th St",
     "116th St and Amsterdam Ave",

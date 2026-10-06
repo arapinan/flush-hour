@@ -12,7 +12,7 @@ Most "nearest restroom" tools return the closest dot on a map. Flush Hour reads 
    Calls `remember_needs` and `find_restrooms`. Results show walking time, open/closed status, and which needs the city's data could not confirm.
 2. `I'm walking from Union Square to the Brooklyn Bridge. Where can I stop on the way?`
    Calls `restrooms_along_route`. Stops come back in walking order with the extra detour, and each site's hours are checked for the minute you would pass it.
-3. `It’s 1am and I’m by Amity Hall. What’s actually open?`
+3. `It’s 1am and I’m by the Met. What’s actually open?`
    Calls `find_restrooms` for a future time, then usually `fallback_options`. Expect an honest "very little is confirmed open" and low-confidence backups.
 
 Follow-ups worth trying in the same chat: `Will the first one be open Sunday night?` (uses `check_open_status`), and `Use the location button` to search from your GPS position.
