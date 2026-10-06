@@ -184,7 +184,10 @@ def call(name, state=None, **args):
 
 
 def test_find():
+    assert len(call("find_restrooms", location="Broadway & 116th St", when="2026-10-05T11:00", limit=10)["results"]) == 3  # hard cap
+    tools.MAX_RESULTS = 5                                                    # look past the cap to check the ordering
     out = call("find_restrooms", location="Broadway & 116th St", when="2026-10-05T11:00")  # Monday 11 AM
+    tools.MAX_RESULTS = 3
     names = [r["name"] for r in out["results"]]
     assert "Morningside Library" in names and "Anibal Aviles Playground" in names, names
     assert "Under Construction Plaza" not in names and out["closed_nearby_omitted"] == 1
@@ -213,7 +216,9 @@ def test_radius_widening():
 
 
 def test_needs_and_session_memory():
+    tools.MAX_RESULTS = 5
     out = call("find_restrooms", location="40.8075,-73.9626", needs=["wheelchair"], when="2026-10-05T11:00")
+    tools.MAX_RESULTS = 3
     assert out["searched_near"] == "your GPS location"
     names = [r["name"] for r in out["results"]]
     assert "Wildlife Sanct. & 119 St Tennis Courts" not in names             # Not Accessible
@@ -334,6 +339,7 @@ def test_check_open_status():
 
 def test_route():
     out = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T11:00")
+    assert len(call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=1500, limit=8)["stops_in_walking_order"]) <= 3
     assert "error" not in out, out
     assert out["walk_min_total"] > 60 and out["route"].startswith("Columbia")
     stops = out["stops_in_walking_order"]
@@ -351,21 +357,23 @@ def test_fallback():
     assert len(out["options"]) <= 3                                                  # default limit is 3
     names = [o["name"] for o in out["options"]]
     assert "Same spot as Anibal Aviles" not in names                                 # duplicate of an official site
-    assert any("OpenStreetMap did not respond" in n for n in out["notes"])           # soft failure noted
+    assert "notes" not in out and "error" not in out                                 # OSM down: answered quietly
     community = [o for o in out["options"] if o["tier"] == "community_listed"]
     assert community and all(o["hours_raw"] for o in community)                      # never listed without hours
     pastry = next(o for o in community if o["name"] == "Hungarian Pastry Shop")
     assert pastry["hours_raw"] == "Mo-Su 08:00-23:30" and "not verified by the city" in pastry["caveat"]
     assert names.count("Hungarian Pastry Shop") == 1                                 # listed twice, shown once
     assert not any(n.startswith("Columbia's") for n in names)    # nearby hours were a different business or too far
-    assert any("Left out 1 community listing" in n for n in out["notes"])
 
     CALLS["osm_fails"] = False
     tools._cache.clear()
     CALLS["hours_lookups"].clear()
     default = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
-    assert len(default["options"]) == 3                                              # still capped by the default
-    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00", limit=10)  # ask for more
+    assert len(default["options"]) == 3
+    assert len(call("fallback_options", location="Columbia", when="2026-10-05T01:00", limit=10)["options"]) == 3  # hard cap
+    tools.MAX_RESULTS = 10                                                           # look past the cap
+    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    tools.MAX_RESULTS = 3
     assert len(out["options"]) > len(default["options"])
     osm = [o for o in out["options"] if o["tier"] == "openstreetmap"]
     assert [o["name"] for o in osm] == ["Pier toilets"]                              # private and no-hours ones left out
@@ -379,7 +387,7 @@ def test_fallback():
     CALLS["hours_down"] = True
     out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
     assert not [o for o in out["options"] if o["tier"] == "community_listed"]
-    assert any("hours lookup did not respond" in n for n in out["notes"])
+    assert "notes" not in out and "error" not in out
     CALLS["hours_down"] = False
 
 

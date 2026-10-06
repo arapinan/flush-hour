@@ -292,7 +292,11 @@
     return el;
   }
 
-  function renderCall(call) {
+  const MAX_PER_SECTION = 3;
+
+  // turn: { certainLeft, uncertain: [{r, kind}] } shared by all of one reply's tool calls, so each
+  // section is capped across calls and uncertain options from every call end up in one place.
+  function renderCall(call, turn) {
     let data;
     try { data = JSON.parse(call.result); } catch { return null; }
     const box = h("section", "results");
@@ -317,11 +321,27 @@
 
     const list = data.results || data.stops_in_walking_order || data.options || [];
     const kind = call.name === "restrooms_along_route" ? "route" : call.name === "fallback_options" ? "fallback" : "near";
-    const head = data.route ? data.route + ", about " + data.walk_min_total + " min on foot" : kind === "fallback" ? "Other Options" : "";
-    if (head) box.appendChild(h("div", "results-head", head));
-    for (const r of list) box.appendChild(card(r, kind));
-    if (kind === "route" && list.length) box.appendChild(h("div", "results-head", "Longest stretch without a stop: " + data.longest_stretch_without_a_stop_min + " min."));
-    for (const n of data.notes || []) box.appendChild(h("div", "note", n));
+    const certain = [];
+    for (const r of list) {
+      if (kind === "fallback" || r.status === "unclear") turn.uncertain.push({ r, kind });
+      else certain.push(r);
+    }
+    turn.searched = true;
+    if (kind === "fallback") return null;
+
+    const shown = certain.slice(0, turn.certainLeft);
+    turn.certainLeft -= shown.length;
+    for (const r of shown) box.appendChild(card(r, kind));
+    return box.childElementCount ? box : null;
+  }
+
+  function renderUncertain(turn) {
+    const seen = new Set();
+    const items = turn.uncertain.filter(({ r }) => !r.id || (!seen.has(r.id) && seen.add(r.id)));
+    if (!items.length) return null;
+    const box = h("section", "results");
+    box.appendChild(h("div", "results-head", "Uncertain Options"));
+    for (const { r, kind } of items.slice(0, MAX_PER_SECTION)) box.appendChild(card(r, kind));
     return box;
   }
 
@@ -387,10 +407,15 @@
       sessionId = data.session_id;
       textEl.classList.remove("thinking");
       textEl.textContent = data.response;
+      const turn = { certainLeft: MAX_PER_SECTION, uncertain: [], searched: false };
       for (const call of data.tool_calls || []) {
-        const rendered = renderCall(call);
+        const rendered = renderCall(call, turn);
         if (rendered) bot.appendChild(rendered);
       }
+      const nothingCertain = turn.searched && turn.certainLeft === MAX_PER_SECTION;
+      if (nothingCertain) bot.appendChild(h("div", "note", "Nothing nearby is confirmed open. If you can make it home, that's your safest bet."));
+      const uncertain = renderUncertain(turn);
+      if (uncertain) bot.appendChild(uncertain);
       if ((data.tool_calls || []).length) bot.appendChild(howItWorked(data.tool_calls));
     } catch (e) {
       textEl.classList.remove("thinking");

@@ -51,6 +51,7 @@ HOURS_MATCH_RADIUS_M = 150  # community listing -> OSM business with hours; volu
 MAX_HOURS_LOOKUPS = 8  # Nominatim lookups per fallback_options call (about one second each)
 DEFAULT_RADIUS_M = 800
 WIDENED_RADIUS_M = 2000
+MAX_RESULTS = 3  # per tool call; the page shows at most 3 cards per section, so the reply never names places it can't show
 
 
 class ToolError(Exception):
@@ -433,11 +434,11 @@ def _describe(site: dict, walk_m: float, verdict: dict, when: datetime, unconfir
 
 
 def find_restrooms(state: dict, location: str, radius_m: int | None = None, needs: list | None = None,
-                   when: str | None = None, limit: int = 5) -> dict:
+                   when: str | None = None, limit: int | None = None) -> dict:
     origin, label = geocode(location)
     when_dt = _parse_when(when)
     needs = _resolve_needs(state, needs)
-    limit = _clamp(limit, 1, 10, 5)
+    limit = _clamp(limit, 1, MAX_RESULTS, MAX_RESULTS)
     explicit_radius = radius_m is not None  # a distance the user asked for is respected, never widened
     radius_m = _clamp(radius_m, 100, 3000, DEFAULT_RADIUS_M) if explicit_radius else DEFAULT_RADIUS_M
 
@@ -503,12 +504,12 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
 
 
 def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int = 300,
-                          needs: list | None = None, when: str | None = None, limit: int = 5) -> dict:
+                          needs: list | None = None, when: str | None = None, limit: int | None = None) -> dict:
     a, start_label = geocode(start)
     b, end_label = geocode(end)
     when_dt = _parse_when(when)
     needs = _resolve_needs(state, needs)
-    max_detour_m, limit = _clamp(max_detour_m, 50, 1500, 300), _clamp(limit, 1, 8, 5)
+    max_detour_m, limit = _clamp(max_detour_m, 50, 1500, 300), _clamp(limit, 1, MAX_RESULTS, MAX_RESULTS)
 
     total_m = grid_distance_m(a, b)
     if total_m < 200:
@@ -702,11 +703,10 @@ def _nominatim_hours(name: str, point: tuple[float, float]) -> str | None:
     return _cached(key, 24 * 3600, lookup)["hours"]
 
 
-def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int = 3) -> dict:
+def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int | None = None) -> dict:
     origin, label = geocode(location)
     when_dt = _parse_when(when)
-    radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, 10, 3)
-    notes: list[str] = []
+    radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, MAX_RESULTS, MAX_RESULTS)
     options: list[dict] = []
     official_points, confirmed_open = [], 0
 
@@ -733,7 +733,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     try:
         osm_toilets, osm_hours = _osm_near(origin, radius_m)
     except requests.RequestException as e:
-        osm_error = e  # best-effort: community listings just show as hours-unknown, and the osm tier is skipped
+        osm_error = e  # best-effort: the osm tier is skipped and community listings rely on the Nominatim lookup
 
     def overpass_hours(point, name):
         matches = [m for m in osm_hours if haversine_m(point, m["point"]) <= HOURS_MATCH_RADIUS_M and _same_business(name, m["name"])]
@@ -755,11 +755,11 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
             candidates.append(r)
             seen_points.append(r["point"])
     except requests.RequestException:
-        notes.append("Refuge Restrooms (community listings) did not respond, so those are missing.")
+        pass  # best-effort, like the OSM tier: the other tiers still answer
 
     conf_rank = {"medium": 0, "low": 1}
     candidates.sort(key=lambda r: (conf_rank[r["confidence"]], r["walk_min"]))
-    lookups_left, with_hours, no_hours, nominatim_failed = min(limit + 3, MAX_HOURS_LOOKUPS), 0, 0, False
+    lookups_left, with_hours, nominatim_failed = min(limit + 3, MAX_HOURS_LOOKUPS), 0, False
     for r in candidates:
         if with_hours >= limit:
             break
@@ -771,7 +771,6 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
             except (requests.RequestException, ValueError):
                 nominatim_failed = True
         if not hours_raw:
-            no_hours += 1
             continue
         with_hours += 1
         options.append({
@@ -785,14 +784,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                       "and the restroom may be for customers only.",
             "map_link": _maps_link(r["point"]),
         })
-    if no_hours:
-        notes.append(f"Left out {no_hours} community listing(s) with no known opening hours.")
-    if nominatim_failed:
-        notes.append("The OpenStreetMap hours lookup did not respond, so some community listings could not be checked.")
-
-    if osm_error:
-        notes.append("OpenStreetMap did not respond (its public servers are often busy), so those are missing.")
-    else:
+    if not osm_error:
         for o in osm_toilets:
             if near_official(o["point"]) or any(haversine_m(o["point"], p) < DUPLICATE_RADIUS_M for p in seen_points):
                 continue
@@ -813,7 +805,6 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
         "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
         "official_sites_confirmed_open_nearby": confirmed_open,
         "options": options[:limit],
-        "notes": notes,
     }
     if confirmed_open:
         out["hint"] = f"{confirmed_open} official site(s) in range are confirmed open; find_restrooms lists them with details."
@@ -869,7 +860,7 @@ TOOLS = [
             "radius_m": {"type": "integer", "description": "Search radius in meters, 100-3000. Omit it unless the user gave a distance (1 short block is about 80 m, 1 avenue block about 270 m). When omitted the tool searches 800 m and widens to 2000 m by itself if nothing is open."},
             "needs": _NEEDS,
             "when": _WHEN,
-            "limit": {"type": "integer", "description": "Max results, 1-10. Default 5."},
+            "limit": {"type": "integer", "description": "Max results, 1-3. Default 3 (the most the page can show)."},
         }, "required": ["location"]},
     }},
     {"type": "function", "function": {
@@ -886,7 +877,7 @@ TOOLS = [
             "max_detour_m": {"type": "integer", "description": "Longest acceptable extra walking distance per stop, in meters, 50-1500. Default 300."},
             "needs": _NEEDS,
             "when": {**_WHEN, "description": "Optional. When the walk STARTS: ISO 8601 NYC local time. Omit for right now."},
-            "limit": {"type": "integer", "description": "Max stops, 1-8. Default 5."},
+            "limit": {"type": "integer", "description": "Max stops, 1-3. Default 3 (the most the page can show)."},
         }, "required": ["start", "end"]},
     }},
     {"type": "function", "function": {
@@ -915,7 +906,7 @@ TOOLS = [
             "location": {"type": "string", "description": _LOCATION},
             "when": _WHEN,
             "radius_m": {"type": "integer", "description": "Search radius in meters, 200-2000. Default 1000."},
-            "limit": {"type": "integer", "description": "Max options, 1-10. Default 3; raise it if the user asks for more options."},
+            "limit": {"type": "integer", "description": "Max options, 1-3. Default 3 (the most the page can show)."},
         }, "required": ["location"]},
     }},
     {"type": "function", "function": {
