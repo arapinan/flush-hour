@@ -34,6 +34,7 @@ Tool-writing choices (from the tool-calling lecture):
 - The harness fills in what the model should not have to: the current NYC time is added to each user turn, and saved needs are read from session state.
 - Place names that match more than one spot (a street in two boroughs, a bar with several branches) return a `needs_clarification` result; the agent asks which one, the page shows buttons, and the chosen option's coordinates are passed back so nothing is looked up twice.
 - Errors are JSON with a next step ("try a larger `radius_m`", "call `find_restrooms` first"), never a stack trace.
+- Arguments are checked before a tool runs, and unreadable ones come back as an error the model can retry from; a bug inside a tool is never blamed on the arguments.
 - Results are small, focused JSON.
 
 ## How it handles messy data
@@ -47,6 +48,7 @@ The hours column has several formats (single daily range, weekly tables with col
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
 - `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options" (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). If nothing is confirmed open, the page suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
+- `check_apis.py`, `probe_geocoding.py`: developer scripts, not used by the app. `check_apis.py` prints a live response from each data source (the tests and the hours parser were written against its output); `probe_geocoding.py` shows how the location lookup handles tricky place names. Both need network access.
 
 ## Run locally
 
