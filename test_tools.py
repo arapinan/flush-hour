@@ -145,8 +145,16 @@ def fake_get(url, params=None, timeout=10):
 def fake_post(url, data, timeout=9):
     if CALLS["osm_fails"]:
         raise requests.ConnectionError("504")
-    return {"elements": [{"id": 5, "lat": 40.8076, "lon": -73.9628, "tags": {"name": "Pier toilets", "access": "yes"}},
-                         {"id": 6, "lat": 40.8077, "lon": -73.9629, "tags": {"access": "private"}}]}
+    return {"elements": [{"id": 5, "lat": 40.8076, "lon": -73.9628, "tags": {"name": "Pier toilets", "amenity": "toilets", "access": "yes"}},
+                         {"id": 6, "lat": 40.8077, "lon": -73.9629, "tags": {"amenity": "toilets", "access": "private"}},
+                         # same spot as the "Arts and Crafts Beer Parlor" Refuge listing below, with hours but not a
+                         # toilet (no amenity=toilets tag, so _osm_near only picks it up for the hours match)
+                         {"id": 7, "lat": 40.8065685, "lon": -73.9610072,
+                          "tags": {"name": "Arts and Crafts Beer Parlor", "opening_hours": "Mo-Su 11:00-02:00"}},
+                         # a few meters from "Columbia's Morningside Campus" below but a different, unrelated
+                         # business: proves proximity alone must not be enough to borrow its hours
+                         {"id": 9, "lat": 40.80810, "lon": -73.96395,
+                          "tags": {"name": "Unrelated Pharmacy", "opening_hours": "Mo-Fr 09:00-21:00"}}]}
 
 
 tools._get_json, tools._post_json = fake_get, fake_post
@@ -322,17 +330,28 @@ def test_route():
 
 def test_fallback():
     out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")   # 1 AM Monday
+    assert len(out["options"]) <= 3                                                  # default limit is 3
     tiers = [o["tier"] for o in out["options"]]
     assert "community_listed" in tiers
     assert "Same spot as Anibal Aviles" not in [o["name"] for o in out["options"]]  # duplicate of an official site
     assert any("OpenStreetMap" in n for n in out["notes"])                           # soft failure noted
     old = next(o for o in out["options"] if o["name"].startswith("Columbia's"))
     assert old["confidence"] == "low" and old["listing_age_years"] >= 10
+    assert old.get("hours_raw") is None and "hours unknown" in old["caveat"]          # no nearby OSM match for this one
+
     CALLS["osm_fails"] = False
-    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    default = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    assert len(default["options"]) == 3                                              # still capped by the default
+    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00", limit=10)  # ask for more
+    assert len(out["options"]) > len(default["options"])
     osm = [o for o in out["options"] if o["tier"] == "openstreetmap"]
     assert [o["name"] for o in osm] == ["Pier toilets"]                              # private one filtered out
-    CALLS["osm_fails"] = True
+    found = next(o for o in out["options"] if o["name"] == "Arts and Crafts Beer Parlor")
+    assert found["hours_raw"] == "Mo-Su 11:00-02:00"                                 # borrowed from a nearby OSM match
+    assert "OpenStreetMap" in found["caveat"] and "not verified by the city" in found["caveat"]
+    unmatched = next(o for o in out["options"] if o["name"].startswith("Columbia's"))
+    assert unmatched.get("hours_raw") is None and "hours unknown" in unmatched["caveat"]  # close, but a different
+    CALLS["osm_fails"] = True                                                        # business ("Unrelated Pharmacy")
 
 
 if __name__ == "__main__":

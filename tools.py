@@ -47,6 +47,7 @@ OVERPASS_URLS = [
 
 NEEDS = ["wheelchair", "changing_station", "gender_neutral"]
 DUPLICATE_RADIUS_M = 40
+HOURS_MATCH_RADIUS_M = 5
 DEFAULT_RADIUS_M = 800
 WIDENED_RADIUS_M = 2000
 
@@ -621,11 +622,19 @@ def _refuge_near(origin: tuple[float, float], per_page: int = 30) -> list[dict]:
     return out
 
 
-def _osm_toilets(origin: tuple[float, float], radius_m: int) -> list[dict]:
+def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], list[dict]]:
+    """One Overpass round trip for everything fallback_options needs from OSM: toilets, and (separately)
+    anything nearby with an opening_hours tag. Refuge Restrooms never gives hours itself, so a nearby OSM
+    listing of the same business (matched by distance back in fallback_options) is the only free source we
+    have for those. Two queries in one call instead of two round trips, since Overpass is already slow/flaky.
+    Returns (toilets, hours_elements).
+    """
     lat, lon = origin
     query = (
-        f'[out:json][timeout:8];(node["amenity"="toilets"](around:{radius_m},{lat},{lon});'
-        f'way["amenity"="toilets"](around:{radius_m},{lat},{lon}););out center 25;'
+        f'[out:json][timeout:8];('
+        f'node["amenity"="toilets"](around:{radius_m},{lat},{lon});way["amenity"="toilets"](around:{radius_m},{lat},{lon});'
+        f'node["opening_hours"](around:{radius_m},{lat},{lon});way["opening_hours"](around:{radius_m},{lat},{lon});'
+        f');out center 80;'
     )
     last_error: Exception | None = None
     for url in OVERPASS_URLS:
@@ -636,28 +645,32 @@ def _osm_toilets(origin: tuple[float, float], radius_m: int) -> list[dict]:
             last_error = e
     else:
         raise requests.RequestException(f"OpenStreetMap servers did not respond ({last_error})")
-    out = []
+
+    toilets, hours = [], []
     for el in elements:
         tags = el.get("tags", {})
         point = (el.get("lat"), el.get("lon")) if "lat" in el else (el.get("center", {}).get("lat"), el.get("center", {}).get("lon"))
-        if None in point or tags.get("access") in ("private", "no"):
+        if None in point:
             continue
-        out.append({
-            "id": f"osm-{el['id']}",
-            "name": tags.get("name") or "Unnamed toilets (OpenStreetMap)",
-            "point": point,
-            "wheelchair": tags.get("wheelchair") == "yes",
-            "access": tags.get("access", "not stated"),
-            "fee": tags.get("fee", "not stated"),
-            "hours_raw": tags.get("opening_hours"),
-        })
-    return out
+        if tags.get("amenity") == "toilets" and tags.get("access") not in ("private", "no"):
+            toilets.append({
+                "id": f"osm-{el['id']}",
+                "name": tags.get("name") or "Unnamed toilets (OpenStreetMap)",
+                "point": point,
+                "wheelchair": tags.get("wheelchair") == "yes",
+                "access": tags.get("access", "not stated"),
+                "fee": tags.get("fee", "not stated"),
+                "hours_raw": tags.get("opening_hours"),
+            })
+        if tags.get("opening_hours") and tags.get("name"):
+            hours.append({"point": point, "name": tags["name"], "hours_raw": tags["opening_hours"]})
+    return toilets, hours
 
 
-def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int = 6) -> dict:
+def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int = 3) -> dict:
     origin, label = geocode(location)
     when_dt = _parse_when(when)
-    radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, 10, 6)
+    radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, 10, 3)
     notes: list[str] = []
     options: list[dict] = []
     official_points, confirmed_open = [], 0
@@ -679,6 +692,24 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     def near_official(point):
         return any(haversine_m(point, p) < DUPLICATE_RADIUS_M for p in official_points)
 
+    osm_toilets: list[dict] = []
+    osm_hours: list[dict] = []
+    osm_error: requests.RequestException | None = None
+    try:
+        osm_toilets, osm_hours = _osm_near(origin, radius_m)
+    except requests.RequestException as e:
+        osm_error = e  # best-effort: community listings just show as hours-unknown, and the osm tier is skipped
+
+    def same_business(name_a: str, name_b: str) -> bool:
+        # Proximity alone isn't enough to prove it's the same place (dense blocks, shared addresses like a
+        # food hall or a medical building can put several unrelated businesses within HOURS_MATCH_RADIUS_M).
+        a, b = _tokens(name_a), _tokens(name_b)
+        return bool(a and b and len(a & b) / min(len(a), len(b)) >= 0.5)
+
+    def nearest_hours(point, name):
+        matches = [m for m in osm_hours if haversine_m(point, m["point"]) <= HOURS_MATCH_RADIUS_M and same_business(name, m["name"])]
+        return min(matches, key=lambda m: haversine_m(point, m["point"])) if matches else None
+
     seen_points = []
     try:
         for r in _refuge_near(origin):
@@ -686,22 +717,30 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 continue
             old = r["listing_age_years"] is not None and r["listing_age_years"] >= 5
             disliked = r["downvotes"] > r["upvotes"]
-            options.append({
+            match = nearest_hours(r["point"], r["name"])
+            option = {
                 "tier": "community_listed", "confidence": "low" if (old or disliked) else "medium",
                 "id": r["id"], "name": r["name"], "address": r["address"],
                 "walk_min": walk_minutes(grid_distance_m(origin, r["point"])),
                 "wheelchair": r["wheelchair"], "all_gender": r["all_gender"], "changing_station": r["changing_station"],
                 "community_votes": f"{r['upvotes']} up / {r['downvotes']} down",
                 "listing_age_years": r["listing_age_years"],
-                "caveat": "Listed by volunteers; hours unknown and may be for customers only.",
                 "map_link": _maps_link(r["point"]),
-            })
+            }
+            if match:
+                option["hours_raw"] = match["hours_raw"]
+                option["caveat"] = "Listed by volunteers; hours below are from OpenStreetMap for this address, not verified by the city."
+            else:
+                option["caveat"] = "Listed by volunteers; hours unknown and may be for customers only."
+            options.append(option)
             seen_points.append(r["point"])
     except requests.RequestException:
         notes.append("Refuge Restrooms (community listings) did not respond, so those are missing.")
 
-    try:
-        for o in _osm_toilets(origin, radius_m):
+    if osm_error:
+        notes.append("OpenStreetMap did not respond (its public servers are often busy), so those are missing.")
+    else:
+        for o in osm_toilets:
             if near_official(o["point"]) or any(haversine_m(o["point"], p) < DUPLICATE_RADIUS_M for p in seen_points):
                 continue
             options.append({
@@ -710,8 +749,6 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 "access": o["access"], "fee": o["fee"], "wheelchair": o["wheelchair"],
                 "hours_raw": o["hours_raw"], "map_link": _maps_link(o["point"]),
             })
-    except requests.RequestException:
-        notes.append("OpenStreetMap did not respond (its public servers are often busy), so those are missing.")
 
     tier_rank = {"official_but_hours_uncertain": 0, "community_listed": 1, "openstreetmap": 2}
     conf_rank = {"medium": 0, "low": 1}
@@ -821,7 +858,7 @@ TOOLS = [
             "location": {"type": "string", "description": _LOCATION},
             "when": _WHEN,
             "radius_m": {"type": "integer", "description": "Search radius in meters, 200-2000. Default 1000."},
-            "limit": {"type": "integer", "description": "Max options, 1-10. Default 6."},
+            "limit": {"type": "integer", "description": "Max options, 1-10. Default 3; raise it if the user asks for more options."},
         }, "required": ["location"]},
     }},
     {"type": "function", "function": {
