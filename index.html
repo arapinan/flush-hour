@@ -293,6 +293,7 @@
   }
 
   const MAX_PER_SECTION = 3;
+  const MAX_ROUTE_STOPS = 5;  // a walk gets more confirmed-open stops than a single spot
 
   // turn: { certainLeft, uncertain: [{r, kind}] } shared by all of one reply's tool calls, so each
   // section is capped across calls and uncertain options from every call end up in one place.
@@ -407,12 +408,14 @@
       sessionId = data.session_id;
       textEl.classList.remove("thinking");
       textEl.textContent = data.response;
-      const turn = { certainLeft: MAX_PER_SECTION, uncertain: [], searched: false };
-      for (const call of data.tool_calls || []) {
+      const calls = data.tool_calls || [];
+      const certainMax = calls.some(c => c.name === "restrooms_along_route") ? MAX_ROUTE_STOPS : MAX_PER_SECTION;
+      const turn = { certainLeft: certainMax, uncertain: [], searched: false };
+      for (const call of calls) {
         const rendered = renderCall(call, turn);
         if (rendered) bot.appendChild(rendered);
       }
-      const nothingCertain = turn.searched && turn.certainLeft === MAX_PER_SECTION;
+      const nothingCertain = turn.searched && turn.certainLeft === certainMax;
       if (nothingCertain) bot.appendChild(h("div", "note", "Nothing nearby is confirmed open. If you can make it home, that's your safest bet."));
       const uncertain = renderUncertain(turn);
       if (uncertain) bot.appendChild(uncertain);

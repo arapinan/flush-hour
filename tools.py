@@ -52,6 +52,7 @@ MAX_HOURS_LOOKUPS = 8  # Nominatim lookups per fallback_options call (about one 
 DEFAULT_RADIUS_M = 800
 WIDENED_RADIUS_M = 2000
 MAX_RESULTS = 3  # per tool call; the page shows at most 3 cards per section, so the reply never names places it can't show
+MAX_ROUTE_STOPS = 5  # a walk gets more room: the page shows up to 5 confirmed-open stops for a route
 
 
 class ToolError(Exception):
@@ -509,7 +510,7 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     b, end_label = geocode(end)
     when_dt = _parse_when(when)
     needs = _resolve_needs(state, needs)
-    max_detour_m, limit = _clamp(max_detour_m, 50, 1500, 300), _clamp(limit, 1, MAX_RESULTS, MAX_RESULTS)
+    max_detour_m, limit = _clamp(max_detour_m, 50, 1500, 300), _clamp(limit, 1, MAX_ROUTE_STOPS, MAX_ROUTE_STOPS)
 
     total_m = grid_distance_m(a, b)
     if total_m < 200:
@@ -877,7 +878,7 @@ TOOLS = [
             "max_detour_m": {"type": "integer", "description": "Longest acceptable extra walking distance per stop, in meters, 50-1500. Default 300."},
             "needs": _NEEDS,
             "when": {**_WHEN, "description": "Optional. When the walk STARTS: ISO 8601 NYC local time. Omit for right now."},
-            "limit": {"type": "integer", "description": "Max stops, 1-3. Default 3 (the most the page can show)."},
+            "limit": {"type": "integer", "description": "Max stops, 1-5. Default 5 (the most the page can show)."},
         }, "required": ["start", "end"]},
     }},
     {"type": "function", "function": {

@@ -339,7 +339,7 @@ def test_check_open_status():
 
 def test_route():
     out = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T11:00")
-    assert len(call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=1500, limit=8)["stops_in_walking_order"]) <= 3
+    assert len(call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=1500, limit=8)["stops_in_walking_order"]) <= 5
     assert "error" not in out, out
     assert out["walk_min_total"] > 60 and out["route"].startswith("Columbia")
     stops = out["stops_in_walking_order"]

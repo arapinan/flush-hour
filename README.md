@@ -45,7 +45,7 @@ The hours column has several formats (single daily range, weekly tables with col
 - `app.py`: FastAPI server, agent loop, sessions. `/chat` returns `response`, `session_id`, `tool_calls`.
 - `tools.py`: the five tools and their JSON schemas.
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
-- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options" (at most 3 cards each). If nothing is confirmed open, the page suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
+- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options" (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). If nothing is confirmed open, the page suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
 
 ## Run locally
@@ -66,5 +66,5 @@ Cloud Run with continuous deploy from GitHub (Developer Connect), buildpack, ent
 - Official data is updated about twice a year; hours and status can be out of date.
 - Community listings can be years old (the agent shows listing age and votes), and their hours come from OpenStreetMap, not the business or the city. Listings with no hours on OpenStreetMap are left out, which is most of them.
 - OpenStreetMap's public servers are often slow; that source is optional, and when it fails those results are simply missing.
-- Each search returns at most 3 places, so a long walk may show only 3 stops.
+- Each search returns at most 3 places (5 stops for a walking route).
 - Walking times and routes are grid estimates, not turn-by-turn directions.
