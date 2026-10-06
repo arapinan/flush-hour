@@ -130,6 +130,8 @@
     50%  { transform: translate(var(--sway), 55vh) rotate(calc(var(--r0) + 25deg)); }
     100% { transform: translate(0, calc(100vh + 6rem)) rotate(calc(var(--r0) + 50deg)); }
   }
+  /* Lift the content above the falling background. z-index needs a position, and the
+     composer must stay fixed, so its position is restated after the shared rule. */
   .app, .composer { position: relative; z-index: 1; }
   .composer { position: fixed; }
 
@@ -171,6 +173,10 @@
 </div>
 
 <script>
+  // One request per message: POST /chat returns { response, session_id, tool_calls }.
+  // The reply text comes from the model; the result cards are drawn from the tool results.
+
+  // --- Page elements ---
   const feed = document.getElementById("feed");
   const intro = document.getElementById("intro");
   const form = document.getElementById("form");
@@ -180,10 +186,12 @@
   const resetBtn = document.getElementById("reset");
   const needsEl = document.getElementById("needs");
 
-  let sessionId = null;
-  let locationOn = false;
-  let lastFix = null;
+  // --- State ---
+  let sessionId = null;    // issued by the server on the first reply, sent back on every later message
+  let locationOn = false;  // is "Use my location" switched on?
+  let lastFix = null;      // last known GPS position as "lat,lon"
 
+  // --- Wording for values that appear in tool results ---
   const NEED_LABEL = { wheelchair: "wheelchair access", changing_station: "a changing station", gender_neutral: "an all-gender restroom" };
   const STATUS_LABEL = { open: "Open", closed: "Closed", unclear: "Not sure" };
   const TIER_LABEL = {
@@ -192,7 +200,9 @@
     openstreetmap: "OpenStreetMap",
   };
 
-  // Everything from the server is inserted with textContent, never innerHTML.
+  // --- Building blocks ---
+
+  // Create an element. Everything from the server is inserted with textContent, never innerHTML.
   function h(tag, cls, text) {
     const node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -200,6 +210,7 @@
     return node;
   }
 
+  // The door-lock status pill: green open, red closed, amber not sure.
   function lock(status) {
     const label = STATUS_LABEL[status];
     if (!label) return null;
@@ -209,6 +220,7 @@
     return pill;
   }
 
+  // The city's accessibility wording -> a short tag (null when it says nothing useful).
   function accessTag(text) {
     const t = (text || "").toLowerCase();
     if (t.startsWith("fully")) return "Wheelchair accessible";
@@ -217,6 +229,8 @@
     return null;
   }
 
+  // Feature tags for one result. Official sites describe features as text
+  // (accessibility, changing_station); community listings use true/false.
   function tagsFor(r) {
     const tags = [];
     if (typeof r.accessibility === "string") { const a = accessTag(r.accessibility); if (a) tags.push(a); }
@@ -228,6 +242,7 @@
     return tags;
   }
 
+  // A "Directions" link, only for the Google Maps URLs the tools build.
   function mapLink(url) {
     if (typeof url !== "string" || !url.startsWith("https://www.google.com/maps/")) return null;
     const a = h("a", "go", "Directions");
@@ -235,15 +250,19 @@
     return a;
   }
 
-  // kind: "near" | "route" | "fallback"
+  // --- Result cards ---
+
+  // One restroom from a search. kind: "near" | "route" | "fallback"
   function card(r, kind) {
     const el = h("article", "card");
+    // Left tile: the walking time
     const tile = h("div", "tile");
     const minutes = kind === "route" ? r.minutes_into_walk : r.walk_min;
     tile.appendChild(h("b", "", minutes ?? "?"));
     tile.appendChild(h("span", "", kind === "route" ? "min into walk" : "min walk"));
     el.appendChild(tile);
 
+    // Right side: name, a line of explanation, hours, then a row of tags
     const body = h("div", "body");
     body.appendChild(h("div", "name", r.name || "Restroom"));
     const note = r.status_note || r.why_uncertain || r.caveat || r.address;
@@ -267,6 +286,7 @@
     return el;
   }
 
+  // The check_open_status result: one restroom's status and its hours for the week.
   function detailCard(d) {
     const el = h("article", "card");
     const tile = h("div", "tile");
@@ -292,9 +312,13 @@
     return el;
   }
 
+  // --- Turning tool calls into what the user sees ---
+
+  // These match MAX_RESULTS and MAX_ROUTE_STOPS in tools.py.
   const MAX_PER_SECTION = 3;
   const MAX_ROUTE_STOPS = 5;  // a walk gets more confirmed-open stops than a single spot
 
+  // Draw one tool call's result. Returns an element, or null when there is nothing to show for it.
   // turn: { certainLeft, uncertain: [{r, kind}] } shared by all of one reply's tool calls, so each
   // section is capped across calls and uncertain options from every call end up in one place.
   function renderCall(call, turn) {
@@ -302,8 +326,10 @@
     try { data = JSON.parse(call.result); } catch { return null; }
     const box = h("section", "results");
 
+    // A tool error: show the message
     if (data.error) { box.appendChild(h("div", "note", data.error)); return box; }
 
+    // The place name was ambiguous: one button per option, each sending the choice as a message
     if (data.needs_clarification) {
       box.appendChild(h("div", "results-head", "That name matches more than one place. Which one?"));
       const choices = h("div", "tools choices");
@@ -320,8 +346,10 @@
     if (call.name === "remember_needs") { showNeeds(data.saved_needs || []); return null; }
     if (call.name === "check_open_status") { box.appendChild(detailCard(data)); return box; }
 
+    // A search. Each of the three search tools names its list differently.
     const list = data.results || data.stops_in_walking_order || data.options || [];
     const kind = call.name === "restrooms_along_route" ? "route" : call.name === "fallback_options" ? "fallback" : "near";
+    // Confirmed-open results are drawn here; uncertain ones are held for renderUncertain
     const certain = [];
     for (const r of list) {
       if (kind === "fallback" || r.status === "unclear") turn.uncertain.push({ r, kind });
@@ -336,6 +364,7 @@
     return box.childElementCount ? box : null;
   }
 
+  // The "Uncertain Options" section: everything held back above, without repeats.
   function renderUncertain(turn) {
     const seen = new Set();
     const items = turn.uncertain.filter(({ r }) => !r.id || (!seen.has(r.id) && seen.add(r.id)));
@@ -354,6 +383,7 @@
     });
   }
 
+  // The "Remembering for this chat" line, updated whenever remember_needs is called.
   function showNeeds(needs) {
     needsEl.textContent = "";
     if (!needs.length) return;
@@ -361,6 +391,7 @@
     needsEl.appendChild(h("b", "", needs.map(n => NEED_LABEL[n] || n).join(", ")));
   }
 
+  // The collapsible "How I found this" panel: every tool call with its arguments and raw result.
   function howItWorked(calls) {
     const details = h("details", "how");
     const names = [...new Set(calls.map(c => c.name))].join(", ");
@@ -376,6 +407,9 @@
     return details;
   }
 
+  // --- Location and sending ---
+
+  // The browser's position as "lat,lon". Falls back to the last known one (or null) if it is blocked or slow.
   function getFix() {
     return new Promise(resolve => {
       if (!navigator.geolocation) return resolve(lastFix);
@@ -387,12 +421,14 @@
     });
   }
 
+  // Send one message and draw the reply.
   async function ask(text) {
     if (!text) return;
     intro.hidden = true;
     sendBtn.disabled = true;
     input.value = "";
 
+    // The user's bubble shows what they typed; the GPS note is only added to what is sent
     let outgoing = text;
     const you = h("div", "turn-you", text);
     if (locationOn) {
@@ -400,6 +436,7 @@
       if (fix) { outgoing += "\n[my GPS location: " + fix + "]"; you.appendChild(h("small", "", "with your location")); }
     }
     feed.appendChild(you);
+    // Placeholder shown while the agent works
     const bot = h("div", "turn-bot");
     const textEl = h("div", "text thinking", "Checking the city's data");
     bot.appendChild(textEl);
@@ -416,6 +453,8 @@
       sessionId = data.session_id;
       textEl.classList.remove("thinking");
       setReply(textEl, data.response);
+
+      // Below the reply: confirmed-open cards, then uncertain options, then the tool-call panel
       const calls = data.tool_calls || [];
       const certainMax = calls.some(c => c.name === "restrooms_along_route") ? MAX_ROUTE_STOPS : MAX_PER_SECTION;
       const turn = { certainLeft: certainMax, uncertain: [], searched: false };
@@ -423,11 +462,12 @@
         const rendered = renderCall(call, turn);
         if (rendered) bot.appendChild(rendered);
       }
+      // A search ran but no confirmed-open card was drawn
       const nothingCertain = turn.searched && turn.certainLeft === certainMax;
       if (nothingCertain) bot.appendChild(h("div", "note", "Nothing nearby is confirmed open. If you can make it home, that's your safest bet."));
       const uncertain = renderUncertain(turn);
       if (uncertain) bot.appendChild(uncertain);
-      if ((data.tool_calls || []).length) bot.appendChild(howItWorked(data.tool_calls));
+      if (calls.length) bot.appendChild(howItWorked(calls));
     } catch (e) {
       textEl.classList.remove("thinking");
       textEl.textContent = "Couldn't reach the server (" + e.message + "). Check your connection and send that again.";
@@ -437,9 +477,13 @@
     input.focus();
   }
 
+  // --- Buttons ---
+
   form.addEventListener("submit", e => { e.preventDefault(); ask(input.value.trim()); });
+  // The example queries send themselves when clicked
   document.querySelectorAll(".example").forEach(b => b.addEventListener("click", () => ask(b.textContent)));
 
+  // "Use my location": a toggle that switches itself back off if the browser refuses
   locBtn.addEventListener("click", async () => {
     locationOn = !locationOn;
     locBtn.setAttribute("aria-pressed", String(locationOn));
@@ -452,6 +496,7 @@
     }
   });
 
+  // "Start over": clear the session on the server, then the page
   resetBtn.addEventListener("click", async () => {
     if (sessionId) await fetch("/clear?session_id=" + encodeURIComponent(sessionId), { method: "POST" });
     sessionId = null;

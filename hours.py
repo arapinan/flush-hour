@@ -16,14 +16,17 @@ Pure standard library so it can be tested offline.
 import re
 from datetime import datetime, timedelta
 
-DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-_T = r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?"
-_RANGE = re.compile(rf"{_T}\s*(?:-|–|—|to)\s*{_T}", re.I)
-_DAY_LINE = re.compile(rf"^\s*({'|'.join(DAYS)})\b[\s:]*(.*)$", re.I)
-SEASONAL_WINTER_MONTHS = (11, 12, 1, 2, 3)
+DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]  # index = datetime.weekday()
+_T = r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?"  # one clock time: hour, optional :minutes, am/pm
+_RANGE = re.compile(rf"{_T}\s*(?:-|–|—|to)\s*{_T}", re.I)  # "8am-4pm", "10:00 am - 6:00 pm"
+_DAY_LINE = re.compile(rf"^\s*({'|'.join(DAYS)})\b[\s:]*(.*)$", re.I)  # "Monday: ..." or "Monday<TAB>..."
+SEASONAL_WINTER_MONTHS = (11, 12, 1, 2, 3)  # when seasonal sites are often shut
+
+# Times of day below are minutes after midnight (480 = 8 AM).
 
 
 def _minutes(h: str, m: str | None, ap: str) -> int:
+    """12-hour clock parts -> minutes after midnight (12 am is 0, 12 pm is 720)."""
     hour = int(h) % 12 + (12 if ap.lower() == "p" else 0)
     return hour * 60 + int(m or 0)
 
@@ -36,6 +39,7 @@ def fmt(minute: int) -> str:
 
 
 def _range(text: str) -> tuple[int, int] | None:
+    """The first 'open - close' range in text as (open, close) minutes, or None."""
     found = _RANGE.search(text)
     if not found:
         return None
@@ -57,6 +61,7 @@ def parse_hours(text: str | None) -> dict:
     if re.search(r"24\s*hours?|24\s*/\s*7", low):
         return {"kind": "always", "days": {}, "later_seasonally": later}
 
+    # Weekly table: one line per day
     days: dict[int, object] = {}
     for line in raw.splitlines():
         match = _DAY_LINE.match(line)
@@ -70,6 +75,7 @@ def parse_hours(text: str | None) -> dict:
     if days:
         return {"kind": "weekly", "days": days, "later_seasonally": later}
 
+    # No day names: a single range that applies every day
     single = _range(raw)
     if single:
         return {"kind": "daily", "days": {i: single for i in range(7)}, "later_seasonally": later}
@@ -77,7 +83,9 @@ def parse_hours(text: str | None) -> dict:
 
 
 def _window_state(window: tuple[int, int], minute: int, later: bool) -> tuple[str, str]:
+    """(state, reason) for one day's (open, close) window at `minute` of that day."""
     start, end = window
+    # Closing time at or before opening time: an overnight range if it ends by 6 AM, else a typo
     if end <= start:
         if end <= 6 * 60:  # genuine overnight range, e.g. 8pm-2am
             if minute >= start or minute < end:
@@ -88,6 +96,7 @@ def _window_state(window: tuple[int, int], minute: int, later: bool) -> tuple[st
         return "open", f"open until {fmt(end)}"
     if minute < start:
         return "closed", f"opens at {fmt(start)}"
+    # Past closing time. "Open later seasonally" means we cannot be sure it has closed.
     if later:
         return "unclear", f"regular hours end at {fmt(end)}, but this site stays open later in some seasons"
     return "closed", f"closed since {fmt(end)}"
@@ -142,9 +151,10 @@ def next_open(text: str | None, when: datetime) -> str | None:
         return "now"
     if sched["kind"] not in ("daily", "weekly"):
         return None
-    for offset in range(8):
+    for offset in range(8):  # today, then each of the next seven days
         day = when + timedelta(days=offset)
         entry = sched["days"].get(day.weekday())
+        # Skip closed or unreadable days, and typo ranges (same rule as _window_state)
         if not isinstance(entry, tuple) or entry[1] <= entry[0] and entry[1] > 6 * 60:
             continue
         opens = day.replace(hour=entry[0] // 60, minute=entry[0] % 60, second=0, microsecond=0)
@@ -155,6 +165,7 @@ def next_open(text: str | None, when: datetime) -> str | None:
 
 def availability(row: dict, when: datetime) -> dict:
     """Combine status / open / hours columns into one verdict for a dataset row."""
+    # The city's own status and season columns overrule the listed hours
     status = (row.get("status") or "").strip()
     if status and status != "Operational":
         return {"state": "closed", "reason": f"the city lists it as '{status}'", "seasonal": False}
@@ -164,6 +175,7 @@ def availability(row: dict, when: datetime) -> dict:
 
     verdict = status_at(row.get("hours_of_operation"), when)
     verdict["seasonal"] = season == "Seasonal"
+    # The data does not say which months a seasonal site runs, so in winter "open" becomes "unclear"
     if verdict["seasonal"] and when.month in SEASONAL_WINTER_MONTHS and verdict["state"] != "closed":
         verdict["state"] = "unclear"
         verdict["reason"] += "; seasonal site, and winter months are often closed — verify before walking over"

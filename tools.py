@@ -20,6 +20,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import requests
@@ -35,24 +36,34 @@ from geo import (
 from hours import availability, hours_for_day, next_open
 
 NYC_TZ = ZoneInfo("America/New_York")
+# The public OpenStreetMap servers require requests to identify themselves.
 HEADERS = {"User-Agent": "flush-hour-class-project/0.1 (Columbia IEOR 4570 student assignment)"}
 
 RESTROOMS_URL = "https://data.cityofnewyork.us/resource/i7jb-7jku.json"
 GEOSEARCH_URL = "https://geosearch.planninglabs.nyc/v2/search"
 REFUGE_URL = "https://www.refugerestrooms.org/api/v1/restrooms/by_location"
-OVERPASS_URLS = [
+OVERPASS_URLS = [  # two mirrors, tried in order
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
-NEEDS = ["wheelchair", "changing_station", "gender_neutral"]
-DUPLICATE_RADIUS_M = 40
-HOURS_MATCH_RADIUS_M = 150  # community listing -> OSM business with hours; volunteer pins are often tens of meters off, so the name must agree too
-MAX_HOURS_LOOKUPS = 8  # Nominatim lookups per fallback_options call (about one second each)
+NEEDS = ["wheelchair", "changing_station", "gender_neutral"]  # the `needs` enum
+
+# Search sizes and result caps
 DEFAULT_RADIUS_M = 800
-WIDENED_RADIUS_M = 2000
-MAX_RESULTS = 3  # per tool call; the page shows at most 3 cards per section, so the reply never names places it can't show
-MAX_ROUTE_STOPS = 5  # a walk gets more room: the page shows up to 5 confirmed-open stops for a route
+WIDENED_RADIUS_M = 2000  # find_restrooms retries once at this radius if 800 m finds nothing
+# Per tool call. The page shows at most 3 cards per section, so the reply never names
+# places it can't show.
+MAX_RESULTS = 3
+# A walk gets more room: the page shows up to 5 confirmed-open stops for a route.
+MAX_ROUTE_STOPS = 5
+
+# fallback_options matching
+DUPLICATE_RADIUS_M = 40  # listings this close together are treated as the same place
+# Community listing -> OSM business with hours. Volunteer pins are often tens of meters
+# off, so the name must agree too.
+HOURS_MATCH_RADIUS_M = 150
+MAX_HOURS_LOOKUPS = 8  # Nominatim lookups per fallback_options call (about one second each)
 
 
 class ToolError(Exception):
@@ -61,10 +72,12 @@ class ToolError(Exception):
 
 # --- Small utilities ---
 
+# key -> (time stored, value). In-memory, single process, like the session store.
 _cache: dict = {}
 
 
-def _cached(key: str, ttl_seconds: int, fn):
+def _cached(key: str, ttl_seconds: int, fn: Callable[[], Any]) -> Any:
+    """Return the value cached under `key` if it is newer than the TTL, else call fn()."""
     hit = _cache.get(key)
     if hit and time.time() - hit[0] < ttl_seconds:
         return hit[1]
@@ -74,19 +87,22 @@ def _cached(key: str, ttl_seconds: int, fn):
     return value
 
 
-def _get_json(url: str, params: dict | None = None, timeout: int = 10):
+def _get_json(url: str, params: dict | None = None, timeout: int = 10) -> Any:
+    """GET a JSON API. Raises requests.RequestException on a timeout or an HTTP error."""
     response = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
 
-def _post_json(url: str, data: dict, timeout: int = 9):
+def _post_json(url: str, data: dict, timeout: int = 9) -> Any:
+    """POST form data to a JSON API (Overpass). Raises like _get_json."""
     response = requests.post(url, data=data, headers=HEADERS, timeout=timeout)
     response.raise_for_status()
     return response.json()
 
 
-def _clamp(value, low: int, high: int, default: int) -> int:
+def _clamp(value: Any, low: int, high: int, default: int) -> int:
+    """Force a model-supplied number into [low, high]; None or junk becomes `default`."""
     try:
         return max(low, min(high, int(value)))
     except (TypeError, ValueError):
@@ -94,6 +110,7 @@ def _clamp(value, low: int, high: int, default: int) -> int:
 
 
 def _maps_link(point: tuple[float, float]) -> str:
+    """Google Maps walking directions to `point`; the page turns it into a button."""
     return f"https://www.google.com/maps/dir/?api=1&destination={point[0]},{point[1]}&travelmode=walking"
 
 
@@ -105,9 +122,10 @@ def _parse_when(when: str | None) -> datetime:
         parsed = datetime.fromisoformat(when.strip())
     except ValueError:
         raise ToolError(
-            f"Could not read when='{when}'. Use ISO 8601 in NYC local time, e.g. '2026-10-05T01:00', or omit it for right now."
+            f"Could not read when='{when}'. Use ISO 8601 in NYC local time, "
+            "e.g. '2026-10-05T01:00', or omit it for right now."
         )
-    if parsed.tzinfo:
+    if parsed.tzinfo:  # a time with a UTC offset: convert it to the NYC wall clock
         parsed = parsed.astimezone(NYC_TZ).replace(tzinfo=None)
     return parsed
 
@@ -119,20 +137,29 @@ def _resolve_needs(state: dict, needs: list | None) -> list[str]:
     bad = [n for n in needs if n not in NEEDS]
     if bad:
         raise ToolError(f"Unknown need(s) {bad}. Allowed values: {NEEDS}.")
-    return list(dict.fromkeys(needs))
+    return list(dict.fromkeys(needs))  # drop repeats, keep order
 
 
 # --- Geocoding ---
+#
+# Two services turn the user's place text into coordinates: the city's GeoSearch knows
+# addresses and intersections, Nominatim knows businesses and venues. geocode() below
+# decides which to believe, and asks the user when a name fits several places.
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 GEOSEARCH_GAP_M = 1000  # street/address matches this far apart are different places
-VENUE_GAP_M = 1000  # named places closer than this are one place (a bridge or a street comes back as many pieces); farther apart = different branches
-NOMINATIM_GAP_S = 1.1  # Nominatim's usage policy: at most one request per second (it answers 429 otherwise)
-_last_nominatim = [0.0]
-MAX_OPTIONS = 4
-TOO_MANY_PLACES = 5  # this many distinct matches means a chain or a very common name: ask for a neighborhood instead
+# Named places closer than this are one place (a bridge or a street comes back as many
+# pieces); farther apart = different branches.
+VENUE_GAP_M = 1000
+# Nominatim's usage policy: at most one request per second (it answers 429 otherwise).
+NOMINATIM_GAP_S = 1.1
+_last_nominatim = [0.0]  # time of the last request; a one-item list so _nominatim can update it
+MAX_OPTIONS = 4  # most choices offered in one "which place?" question
+# This many distinct matches means a chain or a very common name: ask for a neighborhood
+# instead of listing them.
+TOO_MANY_PLACES = 5
 NYC_VIEWBOX = "-74.27,40.92,-73.68,40.49"  # left,top,right,bottom
-_COORDS = re.compile(r"(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)")
+_COORDS = re.compile(r"(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)")  # 'lat,lon' anywhere in the text
 
 
 class NeedsClarification(Exception):
@@ -140,6 +167,8 @@ class NeedsClarification(Exception):
 
     def __init__(self, query: str, candidates: list[dict], weak: bool = False):
         super().__init__(query)
+        # Each option's `location` embeds its coordinates ('Label @ lat,lon'), which
+        # geocode() reads straight back, so the follow-up call needs no second lookup.
         options = [
             {"label": c["label"], "location": f"{c['label']} @ {c['point'][0]:.5f},{c['point'][1]:.5f}"}
             for c in candidates[:MAX_OPTIONS]
@@ -170,16 +199,23 @@ def _spread(candidates: list[dict], min_gap_m: float) -> list[dict]:
 
 
 def _geosearch_candidates(text: str) -> list[dict]:
+    """Addresses, intersections and some landmarks, via the city's own geocoder."""
     data = _get_json(GEOSEARCH_URL, {"text": text, "size": 5})
     found = []
     for feature in data.get("features") or []:
-        lon, lat = feature["geometry"]["coordinates"]
+        lon, lat = feature["geometry"]["coordinates"]  # GeoJSON order: lon first
         props = feature.get("properties", {})
         if in_nyc((lat, lon)):
             label = re.sub(r",\s*NY,\s*USA$", "", props.get("label") or props.get("name") or text)
-            found.append({"label": label, "point": (lat, lon), "confidence": props.get("confidence"), "fallback": props.get("match_type") == "fallback",
-                          "name_text": label.split(",")[0],
-                          "match_text": " ".join(str(props.get(k, "")) for k in ("label", "name", "street"))})
+            found.append({
+                "label": label,
+                "point": (lat, lon),
+                "confidence": props.get("confidence"),
+                "fallback": props.get("match_type") == "fallback",  # a fuzzy guess, not a real match
+                # What _prefer_exact and _fits_query compare against the user's words
+                "name_text": label.split(",")[0],
+                "match_text": " ".join(str(props.get(k, "")) for k in ("label", "name", "street")),
+            })
     if found and found[0]["confidence"] is not None:  # drop clearly weaker matches
         floor = found[0]["confidence"] - 0.1
         found = [c for c in found if c["confidence"] is None or c["confidence"] >= floor]
@@ -187,6 +223,7 @@ def _geosearch_candidates(text: str) -> list[dict]:
 
 
 def _nominatim(params: dict) -> list[dict]:
+    """One Nominatim search, spaced out to respect its rate limit."""
     for attempt in range(2):   # polite: one request per second, and one retry if we are told to slow down
         wait = NOMINATIM_GAP_S - (time.time() - _last_nominatim[0])
         if wait > 0:
@@ -210,17 +247,18 @@ def _venue_candidates(text: str) -> list[dict]:
         try:
             point = (float(r["lat"]), float(r["lon"]))
         except (KeyError, TypeError, ValueError):
-            continue
+            continue  # no usable coordinates
         if not in_nyc(point):
             continue
         a = r.get("address", {})
         # The bounding box also covers New Jersey and Nassau County; keep only New York City addresses.
         if a.get("state") not in (None, "New York") or a.get("city") not in (None, "New York"):
             continue
+        # Label shown to the user: "name, street address, neighborhood"
         street = " ".join(p for p in (a.get("house_number"), a.get("road")) if p)
         area = a.get("neighbourhood") or a.get("suburb") or a.get("city_district") or a.get("borough")
         name = r.get("name") or (r.get("display_name") or "").split(",")[0]
-        if street.lower() == name.lower():
+        if street.lower() == name.lower():  # the place is a street: don't say it twice
             street = ""
         label = ", ".join(p for p in (name, street, area) if p)
         found.append({"label": label or text, "point": point, "name_text": name,
@@ -229,6 +267,7 @@ def _venue_candidates(text: str) -> list[dict]:
 
 
 def _tokens(s: str) -> set[str]:
+    """The lowercase words and numbers in s, ignoring punctuation."""
     return set(re.findall(r"[a-z0-9]+", s.lower()))
 
 
@@ -247,10 +286,13 @@ def _prefer_exact(query_tokens: set[str], candidates: list[dict]) -> list[dict]:
     return exact or candidates
 
 
-_venue_lookup_failed = [False]  # set when the last place-name lookup errored (as opposed to finding nothing)
+# Set when the last place-name lookup errored (as opposed to finding nothing).
+# A one-item list, like _last_nominatim, so _safe_venues can update it.
+_venue_lookup_failed = [False]
 
 
 def _safe_venues(text: str) -> list[dict]:
+    """_venue_candidates, except a service error returns [] and raises the flag above."""
     try:
         _venue_lookup_failed[0] = False
         return _venue_candidates(text)
@@ -268,6 +310,7 @@ def geocode(text: str) -> tuple[tuple[float, float], str]:
     if not text or not text.strip():
         raise ToolError("No location given. Ask the user where they are (address, intersection, or landmark).")
 
+    # Coordinates in the text (GPS, or a chosen clarification option): no lookup needed
     coords = list(_COORDS.finditer(text))
     if coords:
         last = coords[-1]
@@ -277,12 +320,17 @@ def geocode(text: str) -> tuple[tuple[float, float], str]:
             raise ToolError(f"'{text}' is outside New York City, and this agent only covers the five boroughs.")
         return point, label or "your GPS location"
 
-    def lookup():
+    def lookup() -> dict:
+        """Ask the services and decide which matches to believe.
+
+        Returns {"candidates": [...], "weak": bool}, plus "too_many" for chains.
+        """
         query = text.strip()
         geo = _geosearch_candidates(query)
         # Addresses and intersections: the city's own geocoder is authoritative.
         if re.search(r"\d|&|/|\b(?:and|at)\b", query.lower()):
-            good = [c for c in geo if not c.get("fallback")]   # GeoSearch guesses ('6 ST AND AVE B' for '14th Street & 6th Avenue') are not answers
+            # GeoSearch guesses ('6 ST AND AVE B' for '14th Street & 6th Avenue') are not answers
+            good = [c for c in geo if not c.get("fallback")]
             if good:
                 return {"candidates": _spread(good, GEOSEARCH_GAP_M), "weak": False}
             venues = _spread(_safe_venues(query), VENUE_GAP_M)
@@ -293,11 +341,14 @@ def geocode(text: str) -> tuple[tuple[float, float], str]:
         # and prefer ones named exactly that.
         words = _tokens(query)
         geo_good = _prefer_exact(words, [c for c in geo if _fits_query(c, words)])
-        venues = _spread(_prefer_exact(words, [c for c in _safe_venues(query) if _fits_query(c, words)]), VENUE_GAP_M)
+        venue_fits = [c for c in _safe_venues(query) if _fits_query(c, words)]
+        venues = _spread(_prefer_exact(words, venue_fits), VENUE_GAP_M)
         if len(venues) >= TOO_MANY_PLACES:
             return {"too_many": True, "candidates": venues, "weak": False}
+        # Venues that sit within 1 km of a GeoSearch match
         near = [v for v in venues if any(haversine_m(v["point"], g["point"]) < GEOSEARCH_GAP_M for g in geo_good)]
-        if geo_good and near:   # both services agree on one spot ('Astor Place' in Manhattan; another one may exist in Queens)
+        # Both services agree on one spot ('Astor Place' in Manhattan; another one may exist in Queens)
+        if geo_good and near:
             return {"candidates": [near[0]], "weak": False}
         if len(venues) >= 2:  # several real places share this name (branches, or a long street): ask
             return {"candidates": venues, "weak": False}
@@ -307,9 +358,11 @@ def geocode(text: str) -> tuple[tuple[float, float], str]:
             return {"candidates": venues, "weak": False}
         return {"candidates": _spread(geo, GEOSEARCH_GAP_M), "weak": True}  # only weak guesses: confirm with the user
 
+    # Geocodes are cached for 24 hours. `fresh` keeps this call's result even when it is
+    # not worth caching: _cached stores nothing when lookup_for_cache returns None.
     fresh = {}
 
-    def lookup_for_cache():
+    def lookup_for_cache() -> dict | None:
         _venue_lookup_failed[0] = False
         fresh["result"] = lookup()
         # Do not remember an answer reached while the place-name service was erroring: it may be wrong or empty.
@@ -317,6 +370,8 @@ def geocode(text: str) -> tuple[tuple[float, float], str]:
 
     result = _cached("geo:" + text.strip().lower(), 86400, lookup_for_cache) or fresh.get("result")
     found = result["candidates"] if result else []
+
+    # Turn the outcome into one place, a question for the user, or an error the model can act on
     if result and result.get("too_many"):
         raise ToolError(
             f"'{text}' matches many places across NYC (a chain, or a long street). Ask the user for a "
@@ -337,6 +392,7 @@ def geocode(text: str) -> tuple[tuple[float, float], str]:
 
 # --- Official NYC data ---
 
+# The dataset's accessibility wording -> our three levels
 _ACCESS = {
     "fully accessible": "full",
     "partially accessible": "partial",
@@ -350,21 +406,27 @@ def _yes_no_unknown(value: bool | None) -> str:
 
 
 def _normalize_site(row: dict) -> dict | None:
+    """One dataset row -> the fields the tools use, or None if it has no coordinates.
+
+    wheelchair, gender_neutral and changing are None when the city's data does not say.
+    """
     try:
-        lat, lon = float(row["latitude"]), float(row["longitude"])
+        lat, lon = float(row["latitude"]), float(row["longitude"])  # stored as strings
     except (KeyError, TypeError, ValueError):
         return None
     name = (row.get("facility_name") or "Unnamed restroom").strip()
     rtype = (row.get("restroom_type") or "").strip()
+    # Some values carry literal quote characters: '"Yes, in women's restroom only"'
     changing = (row.get("changing_stations") or "").strip().strip('"').strip()
     changing_ok = True if changing.lower().startswith("yes") else (False if changing.lower() == "no" else None)
     return {
+        # The dataset has no id column, so build a stable one from name + coordinates
         "id": "nyc-" + hashlib.sha1(f"{name}|{lat:.5f}|{lon:.5f}".encode()).hexdigest()[:8],
         "name": name,
         "type": (row.get("location_type") or "").strip(),
         "operator": (row.get("operator") or "").strip(),
         "point": (lat, lon),
-        "row": row,
+        "row": row,  # the raw row, kept for its hours / status / season columns
         "wheelchair": _ACCESS.get((row.get("accessibility") or "").strip().lower()),
         "accessibility_text": (row.get("accessibility") or "").strip(),
         "gender_neutral": ("all gender" in rtype.lower()) if rtype else None,
@@ -378,8 +440,8 @@ def _normalize_site(row: dict) -> dict | None:
 def nyc_sites() -> list[dict]:
     """All official sites (about 1,000 rows, so fetch once and filter locally). Cached 6 hours."""
 
-    def fetch():
-        sites = {}
+    def fetch() -> list[dict]:
+        sites = {}  # keyed by id, so a row listed twice is kept once
         for row in _get_json(RESTROOMS_URL, {"$limit": 5000}, timeout=20):
             site = _normalize_site(row)
             if site:
@@ -392,6 +454,7 @@ def nyc_sites() -> list[dict]:
 def _need_check(site: dict, need: str) -> str:
     """'yes' | 'no' | 'unknown' for one need."""
     if need == "wheelchair":
+        # "Partially accessible" may or may not work for this user, so it counts as unconfirmed
         return {"full": "yes", "partial": "unknown", "no": "no"}.get(site["wheelchair"], "unknown")
     if need == "gender_neutral":
         return _yes_no_unknown(site["gender_neutral"])
@@ -408,6 +471,7 @@ def _meets(site: dict, needs: list[str]) -> tuple[str, list[str]]:
 
 
 def _describe(site: dict, walk_m: float, verdict: dict, when: datetime, unconfirmed: list[str]) -> dict:
+    """The JSON record for one restroom: what the model reads and the page draws as a card."""
     record = {
         "id": site["id"],
         "name": site["name"],
@@ -431,11 +495,20 @@ def _describe(site: dict, walk_m: float, verdict: dict, when: datetime, unconfir
     return record
 
 
+# --- The tools ---
+#
+# Every tool takes the session's `state` first (run_tool passes it; the model never sees
+# it), then the arguments from its schema in TOOLS. Each returns a dict that run_tool
+# serializes, and raises ToolError for problems the model can fix.
+
+
 # --- Tool 1 (shared): find_restrooms ---
 
 
 def find_restrooms(state: dict, location: str, radius_m: int | None = None, needs: list | None = None,
                    when: str | None = None, limit: int | None = None) -> dict:
+    """Official restrooms near a place that are not closed at `when`, nearest first."""
+    # Validate and fill in the arguments
     origin, label = geocode(location)
     when_dt = _parse_when(when)
     needs = _resolve_needs(state, needs)
@@ -443,9 +516,11 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
     explicit_radius = radius_m is not None  # a distance the user asked for is respected, never widened
     radius_m = _clamp(radius_m, 100, 3000, DEFAULT_RADIUS_M) if explicit_radius else DEFAULT_RADIUS_M
 
-    def scan(radius: int):
+    def scan(radius: int) -> tuple[list, list, list]:
+        """Sort the sites within `radius` into: meets the needs, might meet them, closed."""
         confirmed, maybe, closed = [], [], []
         for site in nyc_sites():
+            # Straight-line distance decides what is in range; the grid estimate is what we report
             if haversine_m(origin, site["point"]) > radius:
                 continue
             verdict = availability(site["row"], when_dt)
@@ -460,6 +535,7 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
             (confirmed if fit == "yes" else maybe).append(entry)
         return confirmed, maybe, closed
 
+    # Search, widening once if nothing usable is in range
     widened_from = None
     confirmed, maybe, closed = scan(radius_m)
     if not (confirmed or maybe) and not explicit_radius:
@@ -467,6 +543,7 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
         confirmed, maybe, closed = scan(radius_m)
 
     # Sites that are confirmed to fit come first; unconfirmed ones only fill the remaining slots.
+    # Within each group: open before unclear, then the shortest walk.
     confirmed.sort(key=lambda e: (e[2]["state"] != "open", e[0]))
     maybe.sort(key=lambda e: (e[2]["state"] != "open", e[0]))
     chosen = (confirmed + maybe)[:limit]
@@ -486,6 +563,7 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
     if closed:
         walk_m, site, verdict = min(closed, key=lambda c: c[0])
         out["nearest_closed"] = {"name": site["name"], "walk_min": walk_minutes(walk_m), "why": verdict["reason"]}
+    # Nothing to show: tell the model what to try next instead of returning a bare empty list
     if not results:
         needs_text = f" and meets the user's needs ({', '.join(n.replace('_', ' ') for n in needs)})" if needs else ""
         if closed:
@@ -506,6 +584,8 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
 
 def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int = 300,
                           needs: list | None = None, when: str | None = None, limit: int | None = None) -> dict:
+    """Official restrooms close to a walk from `start` to `end`, in walking order."""
+    # Validate and fill in the arguments (a = start point, b = end point)
     a, start_label = geocode(start)
     b, end_label = geocode(end)
     when_dt = _parse_when(when)
@@ -514,9 +594,13 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
 
     total_m = grid_distance_m(a, b)
     if total_m < 200:
-        raise ToolError("Start and end are within a couple of minutes' walk of each other. Use find_restrooms near the start instead.")
+        raise ToolError(
+            "Start and end are within a couple of minutes' walk of each other. "
+            "Use find_restrooms near the start instead."
+        )
     total_min = walk_minutes(total_m)
 
+    # Keep sites that add little extra walking and are not closed when the walker gets there
     found, closed = [], 0
     for site in nyc_sites():
         detour = detour_m(a, b, site["point"])
@@ -533,19 +617,22 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
             continue
         found.append((detour, to_stop, site, verdict, unconfirmed, fit))
 
+    # Pick the best `limit`: sites confirmed to meet the needs first, then the smallest detour
     found.sort(key=lambda f: (f[5] != "yes", f[0]))
     picked = found[:limit]
     picked.sort(key=lambda f: route_position(a, b, f[2]["point"]))  # present in walking order
 
+    # Same record as find_restrooms, with the walk fields swapped for route ones
     stops = []
     for detour, to_stop, site, verdict, unconfirmed, _fit in picked:
         record = _describe(site, to_stop, verdict, when_dt, unconfirmed)
         record["minutes_into_walk"] = record.pop("walk_min")
         record.pop("walk_m")
-        record["extra_walk_min"] = walk_minutes(detour) if detour > 20 else 0
+        record["extra_walk_min"] = walk_minutes(detour) if detour > 20 else 0  # under 20 m is on the way
         record["percent_of_way"] = int(round(100 * route_position(a, b, site["point"])))
         stops.append(record)
 
+    # Longest stretch between consecutive stops, counting the start and the end of the walk
     fractions = [0.0] + [s["percent_of_way"] / 100 for s in stops] + [1.0]
     longest_gap = max(y - x for x, y in zip(fractions, fractions[1:])) * total_min
     out = {
@@ -570,9 +657,14 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
 
 
 def check_open_status(state: dict, restroom_id: str, when: str | None = None) -> dict:
+    """Status at `when`, the weekly hours and the next opening time for one official restroom."""
     when_dt = _parse_when(when)
+    # Ids from fallback_options name another data source; say why instead of "unknown id"
     if restroom_id.startswith("refuge-") or restroom_id.startswith("osm-"):
-        raise ToolError("Community and OpenStreetMap listings do not include hours. Only ids starting 'nyc-' can be checked.")
+        raise ToolError(
+            "Community and OpenStreetMap listings do not include hours. "
+            "Only ids starting 'nyc-' can be checked."
+        )
     site = next((s for s in nyc_sites() if s["id"] == restroom_id), None)
     if not site:
         raise ToolError(
@@ -593,6 +685,7 @@ def check_open_status(state: dict, restroom_id: str, when: str | None = None) ->
                          for i, d in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])},
         "map_link": _maps_link(site["point"]),
     }
+    # A reopening time is only given for a site known to be closed, not for an unclear one
     if verdict["state"] != "open":
         reopening = next_open(row.get("hours_of_operation"), when_dt)
         if reopening and verdict["state"] == "closed":
@@ -606,12 +699,13 @@ def check_open_status(state: dict, restroom_id: str, when: str | None = None) ->
 
 
 def _refuge_near(origin: tuple[float, float], per_page: int = 30) -> list[dict]:
+    """Volunteer-submitted listings near `origin` from Refuge Restrooms, cut down to what we use."""
     year = datetime.now().year
     out = []
     for r in _get_json(REFUGE_URL, {"lat": origin[0], "lng": origin[1], "per_page": per_page}):
         if r.get("approved") is False or r.get("latitude") is None or r.get("longitude") is None:
             continue
-        updated = (r.get("updated_at") or "")[:4]
+        updated = (r.get("updated_at") or "")[:4]  # the year of an ISO timestamp
         out.append({
             "id": f"refuge-{r['id']}",
             "name": (r.get("name") or "Unnamed place").strip(),
@@ -629,19 +723,23 @@ def _refuge_near(origin: tuple[float, float], per_page: int = 30) -> list[dict]:
 
 
 def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], list[dict]]:
-    """One Overpass round trip for everything fallback_options needs from OSM: toilets, and (separately)
-    anything nearby with an opening_hours tag. Refuge Restrooms never gives hours itself, so a nearby OSM
-    listing of the same business (matched by distance and name back in fallback_options) is the quickest
-    source for those; _nominatim_hours covers the ones it misses. Two queries in one call instead of two round trips, since Overpass is already slow/flaky.
-    Returns (toilets, hours_elements).
+    """One Overpass round trip for everything fallback_options needs from OSM.
+
+    Returns (toilets, hours_elements): public toilets, and (separately) anything nearby
+    with a name and an opening_hours tag. Refuge Restrooms never gives hours itself, so
+    a nearby OSM listing of the same business (matched by distance and name back in
+    fallback_options) is the quickest source for those; _nominatim_hours covers the
+    ones it misses. Both are fetched in one query because Overpass is slow and flaky.
     """
     lat, lon = origin
+    # Overpass QL: toilets (nodes and ways) plus anything tagged opening_hours, within the radius
     query = (
         f'[out:json][timeout:8];('
         f'node["amenity"="toilets"](around:{radius_m},{lat},{lon});way["amenity"="toilets"](around:{radius_m},{lat},{lon});'
         f'node["opening_hours"](around:{radius_m},{lat},{lon});way["opening_hours"](around:{radius_m},{lat},{lon});'
         f');out center 80;'
     )
+    # Try each mirror in turn; the for/else raises only if every one of them failed
     last_error: Exception | None = None
     for url in OVERPASS_URLS:
         try:
@@ -655,6 +753,7 @@ def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], l
     toilets, hours = [], []
     for el in elements:
         tags = el.get("tags", {})
+        # A node has its own lat/lon; a way (a building outline) has a computed "center"
         point = (el.get("lat"), el.get("lon")) if "lat" in el else (el.get("center", {}).get("lat"), el.get("center", {}).get("lon"))
         if None in point:
             continue
@@ -674,6 +773,7 @@ def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], l
 
 
 def _same_business(name_a: str, name_b: str) -> bool:
+    """Do the two names share at least half of the shorter one's words?"""
     # Proximity alone isn't enough to prove it's the same place (dense blocks, shared addresses like a
     # food hall or a medical building can put several unrelated businesses right next to each other).
     a, b = _tokens(name_a), _tokens(name_b)
@@ -684,7 +784,7 @@ def _nominatim_hours(name: str, point: tuple[float, float]) -> str | None:
     """Opening hours for a community-listed business, by searching its name in a small box around the
     listing (so a chain matches the branch at this spot, not one across town). Volunteer-entered coordinates
     are often off by a few dozen meters, which is why this finds far more than the Overpass match."""
-    def lookup():
+    def lookup() -> dict:
         lat, lon = point
         dlat, dlon = 0.003, 0.004  # about 330 m each way
         rows = _nominatim({"q": name, "format": "jsonv2", "extratags": 1, "limit": 5,
@@ -698,19 +798,29 @@ def _nominatim_hours(name: str, point: tuple[float, float]) -> str | None:
                 continue
             if hours and haversine_m(point, p) <= HOURS_MATCH_RADIUS_M and _same_business(name, r.get("name") or ""):
                 matches.append((haversine_m(point, p), hours))
-        return {"hours": min(matches)[1] if matches else None}  # a dict, so "no hours" is cached too
+        # Closest match wins. Wrapped in a dict (never empty), so "no hours" is cached too
+        return {"hours": min(matches)[1] if matches else None}
 
     key = f"hours:{name.lower()}:{point[0]:.4f},{point[1]:.4f}"
     return _cached(key, 24 * 3600, lookup)["hours"]
 
 
 def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int | None = None) -> dict:
+    """Less reliable places to try, in three tiers, each with a confidence level.
+
+    1. official sites whose hours are uncertain at `when`
+    2. volunteer-listed businesses (Refuge Restrooms), with hours borrowed from OpenStreetMap
+    3. OpenStreetMap toilets that list hours
+    The two outside sources are best-effort: if one fails, the other tiers still answer.
+    """
     origin, label = geocode(location)
     when_dt = _parse_when(when)
     radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, MAX_RESULTS, MAX_RESULTS)
     options: list[dict] = []
     official_points, confirmed_open = [], 0
 
+    # Tier 1: official sites with uncertain hours. Also note where every official site
+    # is, so the other tiers can skip listings of the same restroom.
     for site in nyc_sites():
         if haversine_m(origin, site["point"]) > radius_m:
             continue
@@ -725,9 +835,10 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 "why_uncertain": verdict["reason"], "map_link": _maps_link(site["point"]),
             })
 
-    def near_official(point):
+    def near_official(point: tuple[float, float]) -> bool:
         return any(haversine_m(point, p) < DUPLICATE_RADIUS_M for p in official_points)
 
+    # One OpenStreetMap request serves tier 3 (toilets) and tier 2 (business hours)
     osm_toilets: list[dict] = []
     osm_hours: list[dict] = []
     osm_error: requests.RequestException | None = None
@@ -736,10 +847,12 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     except requests.RequestException as e:
         osm_error = e  # best-effort: the osm tier is skipped and community listings rely on the Nominatim lookup
 
-    def overpass_hours(point, name):
+    def overpass_hours(point: tuple[float, float], name: str) -> str | None:
+        """Hours of the nearest OSM business that is close by and has a matching name."""
         matches = [m for m in osm_hours if haversine_m(point, m["point"]) <= HOURS_MATCH_RADIUS_M and _same_business(name, m["name"])]
         return min(matches, key=lambda m: haversine_m(point, m["point"]))["hours_raw"] if matches else None
 
+    # Tier 2: community listings.
     # Only options with some opening hours are shown. Refuge Restrooms never has hours, so each listing is
     # matched to an OpenStreetMap business: first the Overpass results we already have, then a Nominatim
     # search. Nominatim allows one request per second, so look up the best candidates first and stop early.
@@ -750,6 +863,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 continue
             if any(_same_business(r["name"], c["name"]) and haversine_m(r["point"], c["point"]) < DUPLICATE_RADIUS_M for c in candidates):
                 continue  # the same place listed twice
+            # An old listing, or one with more downvotes than upvotes, is trusted less
             old = r["listing_age_years"] is not None and r["listing_age_years"] >= 5
             r["confidence"] = "low" if (old or r["downvotes"] > r["upvotes"]) else "medium"
             r["walk_min"] = walk_minutes(grid_distance_m(origin, r["point"]))
@@ -758,6 +872,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     except requests.RequestException:
         pass  # best-effort, like the OSM tier: the other tiers still answer
 
+    # Find hours for the most trusted, nearest candidates first, on a budget of lookups
     conf_rank = {"medium": 0, "low": 1}
     candidates.sort(key=lambda r: (conf_rank[r["confidence"]], r["walk_min"]))
     lookups_left, with_hours, nominatim_failed = min(limit + 3, MAX_HOURS_LOOKUPS), 0, False
@@ -770,9 +885,9 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
             try:
                 hours_raw = _nominatim_hours(r["name"], r["point"])
             except (requests.RequestException, ValueError):
-                nominatim_failed = True
+                nominatim_failed = True  # the service is down: stop asking it
         if not hours_raw:
-            continue
+            continue  # no known hours: left out
         with_hours += 1
         options.append({
             "tier": "community_listed", "confidence": r["confidence"],
@@ -785,6 +900,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                       "and the restroom may be for customers only.",
             "map_link": _maps_link(r["point"]),
         })
+    # Tier 3: OpenStreetMap toilets that list hours and are not already covered above
     if not osm_error:
         for o in osm_toilets:
             if near_official(o["point"]) or any(haversine_m(o["point"], p) < DUPLICATE_RADIUS_M for p in seen_points):
@@ -798,8 +914,8 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 "hours_raw": o["hours_raw"], "map_link": _maps_link(o["point"]),
             })
 
+    # Most trustworthy tier first, then confidence, then the shortest walk
     tier_rank = {"official_but_hours_uncertain": 0, "community_listed": 1, "openstreetmap": 2}
-    conf_rank = {"medium": 0, "low": 1}
     options.sort(key=lambda o: (tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
     out = {
         "searched_near": label,
@@ -818,6 +934,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
 
 
 def remember_needs(state: dict, needs: list) -> dict:
+    """Save the user's standing needs in session state; _resolve_needs reads them back."""
     bad = [n for n in needs if n not in NEEDS]
     if bad:
         raise ToolError(f"Unknown need(s) {bad}. Allowed values: {NEEDS}.")
@@ -827,6 +944,7 @@ def remember_needs(state: dict, needs: list) -> dict:
 
 # --- What the model sees ---
 
+# Argument descriptions shared by several tools, written once so they stay consistent.
 _LOCATION = (
     "Where to search: a NYC street address, intersection, landmark, or neighborhood "
     "(e.g. 'Union Square', 'Amsterdam Avenue & West 116th Street'; write intersections with full street names), "
@@ -844,9 +962,14 @@ _NEEDS = {
 }
 _WHEN = {
     "type": "string",
-    "description": "Optional. ISO 8601 NYC local time, e.g. '2026-10-05T01:00'. Omit for right now. Use for 'tonight at 1am', 'tomorrow morning'.",
+    "description": (
+        "Optional. ISO 8601 NYC local time, e.g. '2026-10-05T01:00'. Omit for right now. "
+        "Use for 'tonight at 1am', 'tomorrow morning'."
+    ),
 }
 
+# The JSON schemas passed to the model on every completion. Each description says what
+# the tool is for and when to use a different one instead.
 TOOLS = [
     {"type": "function", "function": {
         "name": "find_restrooms",
@@ -858,7 +981,11 @@ TOOLS = [
         ),
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": _LOCATION},
-            "radius_m": {"type": "integer", "description": "Search radius in meters, 100-3000. Omit it unless the user gave a distance (1 short block is about 80 m, 1 avenue block about 270 m). When omitted the tool searches 800 m and widens to 2000 m by itself if nothing is open."},
+            "radius_m": {"type": "integer", "description": (
+                "Search radius in meters, 100-3000. Omit it unless the user gave a distance (1 short block is "
+                "about 80 m, 1 avenue block about 270 m). When omitted the tool searches 800 m and widens to "
+                "2000 m by itself if nothing is open."
+            )},
             "needs": _NEEDS,
             "when": _WHEN,
             "limit": {"type": "integer", "description": "Max results, 1-3. Default 3 (the most the page can show)."},
@@ -877,6 +1004,7 @@ TOOLS = [
             "end": {"type": "string", "description": "End of the walk (same formats as start)."},
             "max_detour_m": {"type": "integer", "description": "Longest acceptable extra walking distance per stop, in meters, 50-1500. Default 300."},
             "needs": _NEEDS,
+            # Same as _WHEN, but here the time is when the walk starts
             "when": {**_WHEN, "description": "Optional. When the walk STARTS: ISO 8601 NYC local time. Omit for right now."},
             "limit": {"type": "integer", "description": "Max stops, 1-5. Default 5 (the most the page can show)."},
         }, "required": ["start", "end"]},
@@ -923,6 +1051,7 @@ TOOLS = [
     }},
 ]
 
+# What the harness runs: tool name -> Python function.
 TOOL_MAP = {
     "find_restrooms": find_restrooms,
     "restrooms_along_route": restrooms_along_route,
@@ -940,15 +1069,22 @@ def run_tool(name: str, args: dict, state: dict) -> str:
     """
     if name not in TOOL_MAP:
         return json.dumps({"error": f"Unknown tool '{name}'. Available: {list(TOOL_MAP)}"})
+    # Every outcome, good or bad, goes back to the model as JSON it can act on
     try:
         return json.dumps(TOOL_MAP[name](state, **args), ensure_ascii=False)
-    except NeedsClarification as e:
+    except NeedsClarification as e:  # not an error: a question for the model to pass on
         return json.dumps(e.payload, ensure_ascii=False)
-    except ToolError as e:
+    except ToolError as e:  # the message already says how to fix the call
         return json.dumps({"error": str(e)})
-    except TypeError as e:
+    except TypeError as e:  # a missing or made-up argument
         return json.dumps({"error": f"Bad arguments for {name}: {e}. Check the tool's parameter list."})
-    except requests.RequestException as e:
-        return json.dumps({"error": f"A city data service did not respond ({type(e).__name__}). Wait a moment and retry once; if it keeps failing, tell the user the data is temporarily unavailable."})
+    except requests.RequestException as e:  # a data source timed out or failed
+        return json.dumps({"error": (
+            f"A city data service did not respond ({type(e).__name__}). Wait a moment and retry once; "
+            "if it keeps failing, tell the user the data is temporarily unavailable."
+        )})
     except Exception as e:  # never leak a stack trace to the model or the user
-        return json.dumps({"error": f"Unexpected problem in {name} ({type(e).__name__}). Try rephrasing the request or a different tool."})
+        return json.dumps({"error": (
+            f"Unexpected problem in {name} ({type(e).__name__}). "
+            "Try rephrasing the request or a different tool."
+        )})

@@ -16,6 +16,7 @@ PARKS = "8am-4pm, Open later seasonally"
 
 
 def row(name, lat, lon, **kw):
+    """A dataset row in the real column layout; keyword arguments override the defaults."""
     base = {"facility_name": name, "location_type": "Park", "operator": "NYC Parks", "status": "Operational",
             "open": "Year Round", "hours_of_operation": PARKS, "accessibility": "Fully Accessible",
             "restroom_type": "Multi-Stall W/M Restrooms", "changing_stations": "Yes",
@@ -23,6 +24,7 @@ def row(name, lat, lon, **kw):
     return {**base, **kw}
 
 
+# The fake official dataset: one row per situation the tools must handle.
 ROWS = [
     row("Anibal Aviles Playground", 40.801190, -73.962800),
     row("Playground 123", 40.809980, -73.955900, open="Seasonal", changing_stations="No"),
@@ -35,6 +37,7 @@ ROWS = [
     row("Midtown Plaza", 40.7685, -73.9769, hours_of_operation="24 Hours"),
     {"facility_name": "No coordinates", "status": "Operational"},
 ]
+# The fake Refuge Restrooms response (community listings).
 REFUGE = [
     {"id": 3653, "name": "Columbia's Morningside Campus", "street": "Broadway and 116th Street", "city": "Manhattan",
      "accessible": True, "unisex": True, "directions": "Several buildings on campus", "latitude": 40.80806,
@@ -52,10 +55,12 @@ REFUGE = [
      "updated_at": "2024-01-01T00:00:00Z", "upvote": 1, "downvote": 0, "approved": True},
 ]
 
+# Switches the tests flip to simulate outages, plus counters the fakes below fill in.
 CALLS = {"osm_fails": True, "nominatim_down": False, "rate": 0, "hours_lookups": [], "hours_down": False}
 
 
 def fake_get(url, params=None, timeout=10):
+    """Stands in for tools._get_json: answers each data source's URL with a fixture."""
     if url == tools.RESTROOMS_URL:
         return ROWS
     if url == tools.REFUGE_URL:
@@ -160,6 +165,7 @@ def fake_get(url, params=None, timeout=10):
 
 
 def fake_post(url, data, timeout=9):
+    """Stands in for tools._post_json (Overpass): down by default, like the real servers often are."""
     if CALLS["osm_fails"]:
         raise requests.ConnectionError("504")
     return {"elements": [{"id": 5, "lat": 40.8076, "lon": -73.9628, "tags": {"name": "Pier toilets", "amenity": "toilets", "access": "yes", "opening_hours": "24/7"}},
@@ -175,11 +181,13 @@ def fake_post(url, data, timeout=9):
                           "tags": {"name": "Unrelated Pharmacy", "opening_hours": "Mo-Fr 09:00-21:00"}}]}
 
 
+# Swap the network helpers for the fakes, and skip the one-second wait between Nominatim calls.
 tools._get_json, tools._post_json = fake_get, fake_post
 tools.NOMINATIM_GAP_S = 0
 
 
 def call(name, state=None, **args):
+    """Run a tool the way the harness does (through run_tool) and parse the JSON it returns."""
     return json.loads(tools.run_tool(name, args, state if state is not None else {}))
 
 

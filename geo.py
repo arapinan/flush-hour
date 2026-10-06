@@ -19,11 +19,13 @@ Point = tuple[float, float]  # (lat, lon)
 
 
 def in_nyc(p: Point) -> bool:
+    """Is p inside the bounding box? (The box also catches a little of New Jersey.)"""
     lat_min, lat_max, lon_min, lon_max = NYC_BOUNDS
     return lat_min <= p[0] <= lat_max and lon_min <= p[1] <= lon_max
 
 
 def haversine_m(a: Point, b: Point) -> float:
+    """Straight-line (great-circle) distance in meters."""
     la1, lo1, la2, lo2 = map(math.radians, (*a, *b))
     h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
     return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(h))
@@ -39,6 +41,7 @@ def to_xy(origin: Point, p: Point) -> tuple[float, float]:
 def grid_distance_m(a: Point, b: Point) -> float:
     """Walking-distance estimate: legs along avenues plus legs along cross streets."""
     dx, dy = to_xy(a, b)
+    # Rotate the east/north offsets onto the grid's own axes, then walk one leg along each
     t = math.radians(GRID_ANGLE_DEG)
     along_avenue = dx * math.sin(t) + dy * math.cos(t)
     along_street = dx * math.cos(t) - dy * math.sin(t)
@@ -46,6 +49,7 @@ def grid_distance_m(a: Point, b: Point) -> float:
 
 
 def walk_minutes(meters: float) -> int:
+    """Walking time rounded up to whole minutes, never less than 1."""
     return max(1, math.ceil(meters / WALK_M_PER_MIN))
 
 
@@ -56,6 +60,7 @@ def route_position(start: Point, end: Point, p: Point) -> float:
     length_sq = bx * bx + by * by
     if length_sq == 0:
         return 0.0
+    # Dot product over length squared, clamped so points before the start or past the end still count
     return max(0.0, min(1.0, (px * bx + py * by) / length_sq))
 
 

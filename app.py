@@ -1,3 +1,5 @@
+"""Flush Hour: the web server, the agent harness (tool-calling loop), and the session store."""
+
 import json
 import time
 import uuid
@@ -16,9 +18,12 @@ from tools import TOOLS, run_tool
 # --- Config ---
 
 NYC_TZ = ZoneInfo("America/New_York")
-MAX_TOOL_ROUNDS = 6
-RATE_LIMIT_RETRIES = 2
-RATE_LIMIT_BACKOFF_S = 2
+MAX_TOOL_ROUNDS = 6  # the harness, not the model, bounds how long one turn can run
+RATE_LIMIT_RETRIES = 2  # extra attempts after a 429 from the model API
+RATE_LIMIT_BACKOFF_S = 2  # wait 2 s, then 4 s
+
+# The prompt says when (and when not) to call each tool; the tool schemas in tools.py
+# describe the tools themselves.
 
 SYSTEM_PROMPT = """You are Flush Hour, a dry, quick-witted New Yorker who knows where every public restroom in the five boroughs is, and which ones are actually open. People come to you in a hurry, so be brief and practical.
 
@@ -58,7 +63,7 @@ def _complete_with_retry(messages: list[dict]):
             )
         except litellm.RateLimitError:
             if attempt == RATE_LIMIT_RETRIES:
-                raise
+                raise  # out of retries: chat() turns this into a message for the user
             time.sleep(RATE_LIMIT_BACKOFF_S * (attempt + 1))
 
 
@@ -73,10 +78,12 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
     for _ in range(MAX_TOOL_ROUNDS):
         reply = _complete_with_retry(messages).choices[0].message
 
+        # Append assistant's reply (text, tool calls, or both) to the context.
         # model_dump() keeps it a plain dict: the raw object carries provider-specific
         # fields that trip Pydantic when LiteLLM re-serializes it next round.
         messages += [reply.model_dump()]
 
+        # A reply with no tool calls is the final answer
         if not reply.tool_calls:
             return reply.content or "", tool_calls
 
@@ -84,18 +91,20 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
         for call in reply.tool_calls:
             args = json.loads(call.function.arguments)
             result = run_tool(call.function.name, args, state)
+            # Recorded for the /chat response, so the page can show its work
             tool_calls += [{"name": call.function.name, "args": args, "result": result}]
 
             messages += [{"role": "tool", "tool_call_id": call.id, "content": result}]
 
+    # Still asking for tools after the last round: stop here rather than loop forever
     return "Sorry, I hit my tool-call limit before finishing. Try asking in a simpler way.", tool_calls
 
 
 # --- Session Store ---
 
-# session_id -> list of messages (LLM context), and session_id -> meta state. In-memory, single process.
-sessions: dict[str, list] = {}
-session_state: dict[str, dict] = {}
+# In-memory, single process. Both are keyed by session_id, which keeps chats separate.
+sessions: dict[str, list] = {}  # the LLM context: every message so far
+session_state: dict[str, dict] = {}  # meta state the tools read and write (saved needs)
 
 # --- FastAPI App ---
 
@@ -128,7 +137,10 @@ def chat(request: ChatRequest):
 
     # The model has no clock, so stamp each user turn with the current NYC time
     now = datetime.now(NYC_TZ).strftime("%A %Y-%m-%d %H:%M")
-    sessions[session_id] += [{"role": "user", "content": f"{request.message}\n\n[system note: current NYC time is {now}]"}]
+    user_turn = f"{request.message}\n\n[system note: current NYC time is {now}]"
+
+    # Append user's message to the context
+    sessions[session_id] += [{"role": "user", "content": user_turn}]
 
     try:
         response, tool_calls = run_agent(sessions[session_id], session_state[session_id])
@@ -141,10 +153,12 @@ def chat(request: ChatRequest):
 
 @app.post("/clear")
 def clear(session_id: str | None = None):
+    # "Start over" in the page: forget the conversation and the saved needs
     sessions.pop(session_id, None)
     session_state.pop(session_id, None)
     return {"status": "ok"}
 
 
 if __name__ == "__main__":
+    # Local use only; Cloud Run starts the app with its own uvicorn command (see README)
     uvicorn.run(app, host="127.0.0.1", port=8000)

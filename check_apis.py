@@ -1,10 +1,10 @@
-"""Smoke-test every data source the restroom agent plans to use.
+"""Smoke-test every data source the restroom agent uses.
 
 Run from your own terminal (stdlib only, no install needed):
     python3 check_apis.py
 
-Paste the full output back to Claude so the tools can be written against
-the real response shapes instead of guesses.
+It prints the start of each live response. The tools in tools.py and the fixtures
+in test_tools.py were written against these real response shapes, not guesses.
 """
 
 import json
@@ -18,6 +18,7 @@ UA = {"User-Agent": "ieor4570-restroom-agent/0.1 (class project)"}
 
 
 def get(url, data=None, timeout=30):
+    """Fetch JSON (POST when `data` is given). Returns (parsed body, seconds taken)."""
     req = urllib.request.Request(url, data=data, headers=UA)
     start = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -26,6 +27,7 @@ def get(url, data=None, timeout=30):
 
 
 def show(title, fn):
+    """Run one check and print the first part of its response, or why it failed."""
     print(f"\n=== {title} ===")
     try:
         data, secs = fn()
@@ -33,6 +35,9 @@ def show(title, fn):
         print(json.dumps(data, indent=2)[:1800])
     except Exception as e:  # report, never crash: we want every result
         print(f"FAILED: {type(e).__name__}: {e}")
+
+
+# --- One function per data source (or per question about one) ---
 
 
 def nyc_restrooms():

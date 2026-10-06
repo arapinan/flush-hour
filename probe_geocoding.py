@@ -4,11 +4,13 @@
 
 For each query it prints the top raw matches from both services, then what
 tools.geocode() decided: a single place, a "which one?" question, or an error.
-Paste the whole output to Claude if any decision looks wrong.
+Run it after changing the location logic, and not repeatedly: Nominatim rate-limits.
 """
 
 import tools
 
+# The README's sample places, then the edge cases: a street in two boroughs,
+# intersections written several ways, a single business, and a chain.
 QUERIES = [
     "Columbia University",
     "Union Square",
@@ -28,6 +30,7 @@ QUERIES = [
 
 
 def short(candidates, n=3):
+    """The top n candidates as 'label (lat,lon)' strings."""
     return [f"{c['label'][:70]} ({c['point'][0]:.4f},{c['point'][1]:.4f})" for c in candidates[:n]] or ["(nothing)"]
 
 
