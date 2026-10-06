@@ -47,7 +47,8 @@ OVERPASS_URLS = [
 
 NEEDS = ["wheelchair", "changing_station", "gender_neutral"]
 DUPLICATE_RADIUS_M = 40
-HOURS_MATCH_RADIUS_M = 5
+HOURS_MATCH_RADIUS_M = 150  # community listing -> OSM business with hours; volunteer pins are often tens of meters off, so the name must agree too
+MAX_HOURS_LOOKUPS = 8  # Nominatim lookups per fallback_options call (about one second each)
 DEFAULT_RADIUS_M = 800
 WIDENED_RADIUS_M = 2000
 
@@ -183,23 +184,26 @@ def _geosearch_candidates(text: str) -> list[dict]:
     return found
 
 
-def _venue_candidates(text: str) -> list[dict]:
-    """Business and venue names (GeoSearch only knows addresses), via OpenStreetMap Nominatim."""
-    params = {"q": text, "format": "jsonv2", "limit": 10, "addressdetails": 1,
-              "countrycodes": "us", "viewbox": NYC_VIEWBOX, "bounded": 1}
-    found = []
+def _nominatim(params: dict) -> list[dict]:
     for attempt in range(2):   # polite: one request per second, and one retry if we are told to slow down
         wait = NOMINATIM_GAP_S - (time.time() - _last_nominatim[0])
         if wait > 0:
             time.sleep(wait)
         _last_nominatim[0] = time.time()
         try:
-            rows = _get_json(NOMINATIM_URL, params)
-            break
+            return _get_json(NOMINATIM_URL, params)
         except requests.HTTPError as e:
             if attempt == 1 or getattr(e.response, "status_code", None) != 429:
                 raise
             time.sleep(2)
+    return []
+
+
+def _venue_candidates(text: str) -> list[dict]:
+    """Business and venue names (GeoSearch only knows addresses), via OpenStreetMap Nominatim."""
+    rows = _nominatim({"q": text, "format": "jsonv2", "limit": 10, "addressdetails": 1,
+                       "countrycodes": "us", "viewbox": NYC_VIEWBOX, "bounded": 1})
+    found = []
     for r in rows:
         try:
             point = (float(r["lat"]), float(r["lon"]))
@@ -625,8 +629,8 @@ def _refuge_near(origin: tuple[float, float], per_page: int = 30) -> list[dict]:
 def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], list[dict]]:
     """One Overpass round trip for everything fallback_options needs from OSM: toilets, and (separately)
     anything nearby with an opening_hours tag. Refuge Restrooms never gives hours itself, so a nearby OSM
-    listing of the same business (matched by distance back in fallback_options) is the only free source we
-    have for those. Two queries in one call instead of two round trips, since Overpass is already slow/flaky.
+    listing of the same business (matched by distance and name back in fallback_options) is the quickest
+    source for those; _nominatim_hours covers the ones it misses. Two queries in one call instead of two round trips, since Overpass is already slow/flaky.
     Returns (toilets, hours_elements).
     """
     lat, lon = origin
@@ -667,6 +671,37 @@ def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], l
     return toilets, hours
 
 
+def _same_business(name_a: str, name_b: str) -> bool:
+    # Proximity alone isn't enough to prove it's the same place (dense blocks, shared addresses like a
+    # food hall or a medical building can put several unrelated businesses right next to each other).
+    a, b = _tokens(name_a), _tokens(name_b)
+    return bool(a and b and len(a & b) / min(len(a), len(b)) >= 0.5)
+
+
+def _nominatim_hours(name: str, point: tuple[float, float]) -> str | None:
+    """Opening hours for a community-listed business, by searching its name in a small box around the
+    listing (so a chain matches the branch at this spot, not one across town). Volunteer-entered coordinates
+    are often off by a few dozen meters, which is why this finds far more than the Overpass match."""
+    def lookup():
+        lat, lon = point
+        dlat, dlon = 0.003, 0.004  # about 330 m each way
+        rows = _nominatim({"q": name, "format": "jsonv2", "extratags": 1, "limit": 5,
+                           "viewbox": f"{lon - dlon},{lat + dlat},{lon + dlon},{lat - dlat}", "bounded": 1})
+        matches = []
+        for r in rows:
+            hours = (r.get("extratags") or {}).get("opening_hours")
+            try:
+                p = (float(r["lat"]), float(r["lon"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if hours and haversine_m(point, p) <= HOURS_MATCH_RADIUS_M and _same_business(name, r.get("name") or ""):
+                matches.append((haversine_m(point, p), hours))
+        return {"hours": min(matches)[1] if matches else None}  # a dict, so "no hours" is cached too
+
+    key = f"hours:{name.lower()}:{point[0]:.4f},{point[1]:.4f}"
+    return _cached(key, 24 * 3600, lookup)["hours"]
+
+
 def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int = 3) -> dict:
     origin, label = geocode(location)
     when_dt = _parse_when(when)
@@ -700,48 +735,68 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     except requests.RequestException as e:
         osm_error = e  # best-effort: community listings just show as hours-unknown, and the osm tier is skipped
 
-    def same_business(name_a: str, name_b: str) -> bool:
-        # Proximity alone isn't enough to prove it's the same place (dense blocks, shared addresses like a
-        # food hall or a medical building can put several unrelated businesses within HOURS_MATCH_RADIUS_M).
-        a, b = _tokens(name_a), _tokens(name_b)
-        return bool(a and b and len(a & b) / min(len(a), len(b)) >= 0.5)
+    def overpass_hours(point, name):
+        matches = [m for m in osm_hours if haversine_m(point, m["point"]) <= HOURS_MATCH_RADIUS_M and _same_business(name, m["name"])]
+        return min(matches, key=lambda m: haversine_m(point, m["point"]))["hours_raw"] if matches else None
 
-    def nearest_hours(point, name):
-        matches = [m for m in osm_hours if haversine_m(point, m["point"]) <= HOURS_MATCH_RADIUS_M and same_business(name, m["name"])]
-        return min(matches, key=lambda m: haversine_m(point, m["point"])) if matches else None
-
-    seen_points = []
+    # Only options with some opening hours are shown. Refuge Restrooms never has hours, so each listing is
+    # matched to an OpenStreetMap business: first the Overpass results we already have, then a Nominatim
+    # search. Nominatim allows one request per second, so look up the best candidates first and stop early.
+    candidates, seen_points = [], []
     try:
         for r in _refuge_near(origin):
             if haversine_m(origin, r["point"]) > radius_m or near_official(r["point"]):
                 continue
+            if any(_same_business(r["name"], c["name"]) and haversine_m(r["point"], c["point"]) < DUPLICATE_RADIUS_M for c in candidates):
+                continue  # the same place listed twice
             old = r["listing_age_years"] is not None and r["listing_age_years"] >= 5
-            disliked = r["downvotes"] > r["upvotes"]
-            match = nearest_hours(r["point"], r["name"])
-            option = {
-                "tier": "community_listed", "confidence": "low" if (old or disliked) else "medium",
-                "id": r["id"], "name": r["name"], "address": r["address"],
-                "walk_min": walk_minutes(grid_distance_m(origin, r["point"])),
-                "wheelchair": r["wheelchair"], "all_gender": r["all_gender"], "changing_station": r["changing_station"],
-                "community_votes": f"{r['upvotes']} up / {r['downvotes']} down",
-                "listing_age_years": r["listing_age_years"],
-                "map_link": _maps_link(r["point"]),
-            }
-            if match:
-                option["hours_raw"] = match["hours_raw"]
-                option["caveat"] = "Listed by volunteers; hours below are from OpenStreetMap for this address, not verified by the city."
-            else:
-                option["caveat"] = "Listed by volunteers; hours unknown and may be for customers only."
-            options.append(option)
+            r["confidence"] = "low" if (old or r["downvotes"] > r["upvotes"]) else "medium"
+            r["walk_min"] = walk_minutes(grid_distance_m(origin, r["point"]))
+            candidates.append(r)
             seen_points.append(r["point"])
     except requests.RequestException:
         notes.append("Refuge Restrooms (community listings) did not respond, so those are missing.")
+
+    conf_rank = {"medium": 0, "low": 1}
+    candidates.sort(key=lambda r: (conf_rank[r["confidence"]], r["walk_min"]))
+    lookups_left, with_hours, no_hours, nominatim_failed = min(limit + 3, MAX_HOURS_LOOKUPS), 0, 0, False
+    for r in candidates:
+        if with_hours >= limit:
+            break
+        hours_raw = overpass_hours(r["point"], r["name"])
+        if not hours_raw and lookups_left and not nominatim_failed:
+            lookups_left -= 1
+            try:
+                hours_raw = _nominatim_hours(r["name"], r["point"])
+            except (requests.RequestException, ValueError):
+                nominatim_failed = True
+        if not hours_raw:
+            no_hours += 1
+            continue
+        with_hours += 1
+        options.append({
+            "tier": "community_listed", "confidence": r["confidence"],
+            "id": r["id"], "name": r["name"], "address": r["address"], "walk_min": r["walk_min"],
+            "wheelchair": r["wheelchair"], "all_gender": r["all_gender"], "changing_station": r["changing_station"],
+            "community_votes": f"{r['upvotes']} up / {r['downvotes']} down",
+            "listing_age_years": r["listing_age_years"],
+            "hours_raw": hours_raw,
+            "caveat": "Listed by volunteers; hours are from OpenStreetMap for this business, not verified by the city, "
+                      "and the restroom may be for customers only.",
+            "map_link": _maps_link(r["point"]),
+        })
+    if no_hours:
+        notes.append(f"Left out {no_hours} community listing(s) with no known opening hours.")
+    if nominatim_failed:
+        notes.append("The OpenStreetMap hours lookup did not respond, so some community listings could not be checked.")
 
     if osm_error:
         notes.append("OpenStreetMap did not respond (its public servers are often busy), so those are missing.")
     else:
         for o in osm_toilets:
             if near_official(o["point"]) or any(haversine_m(o["point"], p) < DUPLICATE_RADIUS_M for p in seen_points):
+                continue
+            if not o["hours_raw"]:
                 continue
             options.append({
                 "tier": "openstreetmap", "confidence": "low", "id": o["id"], "name": o["name"],
@@ -851,8 +906,10 @@ TOOLS = [
         "description": (
             "Last-resort places to try when find_restrooms has nothing open or suitable: official sites whose hours "
             "are uncertain, volunteer-listed restrooms in businesses and campus buildings (with listing age and "
-            "votes), and OpenStreetMap toilets. Each option carries a confidence and caveat; be honest with the "
-            "user that these are less reliable. Call find_restrooms first."
+            "votes), and OpenStreetMap toilets. Only places with known opening hours are returned (hours_raw, from "
+            "OpenStreetMap, in its opening_hours format); compare them to the requested time yourself. Each option "
+            "carries a confidence and caveat; be honest with the user that these are less reliable. Call "
+            "find_restrooms first."
         ),
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": _LOCATION},
