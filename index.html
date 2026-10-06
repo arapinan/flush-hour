@@ -316,7 +316,7 @@
 
     const list = data.results || data.stops_in_walking_order || data.options || [];
     const kind = call.name === "restrooms_along_route" ? "route" : call.name === "fallback_options" ? "fallback" : "near";
-    const head = data.route ? data.route + ", about " + data.walk_min_total + " min on foot" : data.searched_near ? "Near " + data.searched_near + ", " + data.at_time : "";
+    const head = data.route ? data.route + ", about " + data.walk_min_total + " min on foot" : kind === "fallback" ? "Other Options" : "";
     if (head) box.appendChild(h("div", "results-head", head));
     for (const r of list) box.appendChild(card(r, kind));
     if (!list.length) {
@@ -326,7 +326,6 @@
         : "No official restroom" + radius + " is open at that time.";
       box.appendChild(h("div", "note", empty));
     }
-    if (data.widened_from_m) box.appendChild(h("div", "results-head", "Nothing was open within " + data.widened_from_m + " m, so I searched out to " + data.radius_m_searched + " m."));
     if (!list.length && data.nearest_closed) box.appendChild(h("div", "results-head", "Closest one that is closed: " + data.nearest_closed.name + " (" + data.nearest_closed.why + ")."));
     if (kind === "route" && list.length) box.appendChild(h("div", "results-head", "Longest stretch without a stop: " + data.longest_stretch_without_a_stop_min + " min."));
     for (const n of data.notes || []) box.appendChild(h("div", "note", n));

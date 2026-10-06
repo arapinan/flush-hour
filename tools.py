@@ -467,7 +467,7 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
 
     out = {
         "searched_near": label,
-        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " (NYC time)",
+        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
         "radius_m_searched": radius_m,
         "needs_applied": needs,
         "walk_times": "estimates along Manhattan's street grid, ~80 m/min",
@@ -544,7 +544,7 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     out = {
         "route": f"{start_label} → {end_label}",
         "walk_min_total": total_min,
-        "leaving_at": when_dt.strftime("%A %H:%M") + " (NYC time)",
+        "leaving_at": when_dt.strftime("%A %H:%M") + " EST",
         "needs_applied": needs,
         "stops_in_walking_order": stops,
         "longest_stretch_without_a_stop_min": int(round(longest_gap)),
@@ -577,7 +577,7 @@ def check_open_status(state: dict, restroom_id: str, when: str | None = None) ->
     out = {
         "id": site["id"],
         "name": site["name"],
-        "checked_for": when_dt.strftime("%A %Y-%m-%d %H:%M") + " (NYC time)",
+        "checked_for": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
         "status": verdict["state"],
         "status_note": verdict["reason"],
         "city_status": row.get("status") or "not listed",
@@ -718,7 +718,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     options.sort(key=lambda o: (tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
     out = {
         "searched_near": label,
-        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " (NYC time)",
+        "at_time": when_dt.strftime("%A %Y-%m-%d %H:%M") + " EST",
         "official_sites_confirmed_open_nearby": confirmed_open,
         "options": options[:limit],
         "notes": notes,
