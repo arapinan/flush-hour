@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from tools import TOOLS, run_tool
 
 NYC_TZ = ZoneInfo("America/New_York")
 MAX_TOOL_ROUNDS = 6
+RATE_LIMIT_RETRIES = 2
+RATE_LIMIT_BACKOFF_S = 2
 
 SYSTEM_PROMPT = """You are Flush Hour, a dry, quick-witted New Yorker who knows where every public restroom in the five boroughs is, and which ones are actually open. People come to you in a hurry, so be brief and practical.
 
@@ -42,6 +45,22 @@ Rules:
 # --- The Harness ---
 
 
+def _complete_with_retry(messages: list[dict]):
+    """litellm.completion, retrying briefly on transient 429s (shared Vertex AI quota) before giving up."""
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        try:
+            return litellm.completion(
+                model="vertex_ai/gemini-3.5-flash-lite",
+                vertex_location="global",
+                messages=messages,
+                tools=TOOLS,
+            )
+        except litellm.RateLimitError:
+            if attempt == RATE_LIMIT_RETRIES:
+                raise
+            time.sleep(RATE_LIMIT_BACKOFF_S * (attempt + 1))
+
+
 def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
     """Complete until the model answers without asking for a tool.
 
@@ -51,12 +70,7 @@ def run_agent(messages: list[dict], state: dict) -> tuple[str, list[dict]]:
     tool_calls = []
 
     for _ in range(MAX_TOOL_ROUNDS):
-        reply = litellm.completion(
-            model="vertex_ai/gemini-3.5-flash-lite",
-            vertex_location="global",
-            messages=messages,
-            tools=TOOLS,
-        ).choices[0].message
+        reply = _complete_with_retry(messages).choices[0].message
 
         # model_dump() keeps it a plain dict: the raw object carries provider-specific
         # fields that trip Pydantic when LiteLLM re-serializes it next round.
