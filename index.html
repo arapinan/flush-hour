@@ -327,7 +327,7 @@
       box.appendChild(h("div", "note", empty));
     }
     if (data.widened_from_m) box.appendChild(h("div", "results-head", "Nothing was open within " + data.widened_from_m + " m, so I searched out to " + data.radius_m_searched + " m."));
-    if (data.nearest_closed) box.appendChild(h("div", "results-head", "Closest one that is closed: " + data.nearest_closed.name + " (" + data.nearest_closed.why + ")."));
+    if (!list.length && data.nearest_closed) box.appendChild(h("div", "results-head", "Closest one that is closed: " + data.nearest_closed.name + " (" + data.nearest_closed.why + ")."));
     if (kind === "route" && list.length) box.appendChild(h("div", "results-head", "Longest stretch without a stop: " + data.longest_stretch_without_a_stop_min + " min."));
     for (const n of data.notes || []) box.appendChild(h("div", "note", n));
     return box;
