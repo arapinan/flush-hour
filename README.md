@@ -13,7 +13,7 @@ Most "nearest restroom" tools return the closest dot on a map. Flush Hour reads 
 2. `I'm walking from Union Square to the Brooklyn Bridge. Where can I stop on the way?`
    Calls `restrooms_along_route`. Stops come back in walking order with the extra detour, and each site's hours are checked for the minute you would pass it.
 3. `It’s 1am and I’m by the Met. What’s actually open?`
-   Calls `find_restrooms` for a future time, then usually `fallback_options`. Expect an honest "very little is confirmed open" and low-confidence backups.
+   Calls `find_restrooms` for a future time, then usually `fallback_options`. Expect an honest "very little is confirmed open", a suggestion to use the bathroom at home if possible, and a few backups under "Uncertain Options".
 
 Follow-ups worth trying in the same chat: `Will the first one be open Sunday night?` (uses `check_open_status`), and `Use the location button` to search from your GPS position.
 
@@ -24,7 +24,7 @@ Follow-ups worth trying in the same chat: `Will the first one be open Sunday nig
 | `find_restrooms` | Official NYC restrooms near a place, ranked by estimated walking time, skipping any that are closed at the requested time. Searches 800 m, widens to 2 km on its own if nothing is open, and respects a distance the user states. | NYC Open Data "Public Restrooms", NYC GeoSearch, OpenStreetMap Nominatim (business names) |
 | `restrooms_along_route` | Restrooms near a walk from A to B, ordered along the route, with detour cost, hours checked at arrival time, and the longest stretch without a stop. | same |
 | `check_open_status` | Weekly hours, open/closed/unclear at a given time, and the next opening time for one restroom. | same |
-| `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass) |
+| `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Only places with known opening hours are returned; volunteer listings get theirs from the same business on OpenStreetMap. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass, Nominatim) |
 | `remember_needs` | Saves standing needs for the session so later searches apply them automatically. | session state |
 
 Tool-writing choices (from the tool-calling lecture):
@@ -45,7 +45,7 @@ The hours column has several formats (single daily range, weekly tables with col
 - `app.py`: FastAPI server, agent loop, sessions. `/chat` returns `response`, `session_id`, `tool_calls`.
 - `tools.py`: the five tools and their JSON schemas.
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
-- `index.html`: the interface; each answer has a "How I found this" panel listing every tool call.
+- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options" (at most 3 cards each). If nothing is confirmed open, the page suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
 
 ## Run locally
@@ -64,6 +64,7 @@ Cloud Run with continuous deploy from GitHub (Developer Connect), buildpack, ent
 ## Limitations
 
 - Official data is updated about twice a year; hours and status can be out of date.
-- Community listings can be years old (the agent shows listing age and votes).
-- OpenStreetMap's public servers are often slow; that source is optional and failures are reported, not hidden.
+- Community listings can be years old (the agent shows listing age and votes), and their hours come from OpenStreetMap, not the business or the city. Listings with no hours on OpenStreetMap are left out, which is most of them.
+- OpenStreetMap's public servers are often slow; that source is optional, and when it fails those results are simply missing.
+- Each search returns at most 3 places, so a long walk may show only 3 stops.
 - Walking times and routes are grid estimates, not turn-by-turn directions.
