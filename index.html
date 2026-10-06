@@ -346,6 +346,14 @@
     return box;
   }
 
+  // The model marks names with **bold**. Build text and <b> nodes (never innerHTML) so nothing else in the reply is treated as markup.
+  function setReply(el, text) {
+    el.textContent = "";
+    (text || "").split(/\*\*(.+?)\*\*/g).forEach((part, i) => {
+      if (part) el.appendChild(i % 2 ? h("b", "", part) : document.createTextNode(part));
+    });
+  }
+
   function showNeeds(needs) {
     needsEl.textContent = "";
     if (!needs.length) return;
@@ -407,7 +415,7 @@
       const data = await res.json();
       sessionId = data.session_id;
       textEl.classList.remove("thinking");
-      textEl.textContent = data.response;
+      setReply(textEl, data.response);
       const calls = data.tool_calls || [];
       const certainMax = calls.some(c => c.name === "restrooms_along_route") ? MAX_ROUTE_STOPS : MAX_PER_SECTION;
       const turn = { certainLeft: certainMax, uncertain: [], searched: false };
