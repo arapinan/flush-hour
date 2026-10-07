@@ -15,7 +15,7 @@ Most "nearest restroom" tools return the closest dot on a map. Flush Hour reads 
 3. `It’s 1am and I’m by the Met. What’s actually open?`
    Calls `find_restrooms` for a future time, then usually `fallback_options`. Expect an honest "very little is confirmed open", a suggestion to use the bathroom at home if possible, and a few backups under "Uncertain Options".
 
-Follow-ups worth trying in the same chat: `Will the first one be open Sunday night?` (uses `check_open_status`), and `Use the location button` to search from your GPS position.
+Follow-ups worth trying in the same chat: `Will the first one be open Sunday night?` (uses `check_open_status`), and turning on `Use my location` and asking without naming a place (`I need to pee`) to search from your GPS position.
 
 ## Tools
 
@@ -46,7 +46,7 @@ The hours column has several formats (single daily range, weekly tables with col
 - `app.py`: FastAPI server, agent loop, sessions. `/chat` returns `response`, `session_id`, `tool_calls`.
 - `tools.py`: the five tools and their JSON schemas.
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
-- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options", in the same order as `fallback_options` (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). An explanation every card shares is shown once above them. If nothing is confirmed open, the page (not the model) suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call; tool errors appear only there, since they are written for the model, which retries or explains them in its reply.
+- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options", in the same order as `fallback_options` (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). An explanation every card shares is shown once above them. If nothing is confirmed open, the page (not the model) suggests using the bathroom at home. With "Use my location" on, a place typed in the message still wins over GPS, and a "Searched near" line then says where the search ran. Each answer has a "How I found this" panel listing every tool call; tool errors appear only there, since they are written for the model, which retries or explains them in its reply.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
 - `check_apis.py`, `probe_geocoding.py`: developer scripts, not used by the app. `check_apis.py` prints a live response from each data source (the tests and the hours parser were written against its output); `probe_geocoding.py` shows how the location lookup handles tricky place names. Both need network access.
 

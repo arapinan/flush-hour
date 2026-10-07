@@ -331,6 +331,19 @@
   const MAX_PER_SECTION = 3;
   const MAX_ROUTE_STOPS = 5;  // a walk gets more confirmed-open stops than a single spot
 
+  // Where the first search ran, as "Searched near: ..." or "Route: ...", or null if no search ran or
+  // it ran at the user's GPS point (geocode labels raw coordinates "your GPS location"). A route always
+  // has a typed end, so it is always returned.
+  function typedPlace(calls) {
+    for (const call of calls) {
+      let data;
+      try { data = JSON.parse(call.result); } catch { continue; }
+      if (data.searched_near) return data.searched_near === "your GPS location" ? null : "Searched near: " + data.searched_near;
+      if (data.route) return "Route: " + data.route;
+    }
+    return null;
+  }
+
   // Draw one tool call's result. Returns an element, or null when there is nothing to show for it.
   // turn: { certainLeft, uncertain: [{r, kind}] } shared by all of one reply's tool calls, so each
   // section is capped across calls and uncertain options from every call end up in one place.
@@ -462,10 +475,15 @@
 
     // The user's bubble shows what they typed; the GPS note is only added to what is sent
     let outgoing = text;
+    let sentLocation = false;
     const you = h("div", "turn-you", text);
     if (locationOn) {
       const fix = await getFix();
-      if (fix) { outgoing += "\n[my GPS location: " + fix + "]"; you.appendChild(h("small", "", "with your location")); }
+      if (fix) {
+        outgoing += "\n[my GPS location: " + fix + "]";
+        sentLocation = true;
+        you.appendChild(h("small", "", "with your location"));
+      }
     }
     feed.appendChild(you);
     // Placeholder shown while the agent works
@@ -486,8 +504,13 @@
       textEl.classList.remove("thinking");
       setReply(textEl, data.response);
 
-      // Below the reply: confirmed-open cards, then uncertain options, then the tool-call panel
+      // Location was on, but the search ran at a place the user typed: say where, so it is clear
+      // the GPS point was not used (and a wrong place is easy to spot)
       const calls = data.tool_calls || [];
+      const place = sentLocation ? typedPlace(calls) : null;
+      if (place) bot.appendChild(h("div", "results-note", place));
+
+      // Below the reply: confirmed-open cards, then uncertain options, then the tool-call panel
       const certainMax = calls.some(c => c.name === "restrooms_along_route") ? MAX_ROUTE_STOPS : MAX_PER_SECTION;
       const turn = { certainLeft: certainMax, uncertain: [], searched: false };
       for (const call of calls) {

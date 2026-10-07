@@ -1013,7 +1013,8 @@ _LOCATION = (
     "Where to search: a NYC street address, intersection, landmark, or neighborhood "
     "(e.g. 'Union Square', 'Amsterdam Avenue & West 116th Street'; write intersections with full street names), "
     "or GPS as 'lat,lon' (e.g. '40.8075,-73.9626'). "
-    "If the user's message contains '[my GPS location: lat,lon]', pass those coordinates. "
+    "If the user's message contains '[my GPS location: lat,lon]', pass those coordinates only when the user names "
+    "no place to search ('near me', 'here', or nothing); a place they name wins. "
     "If a result says needs_clarification, ask the user which place they mean, then pass the chosen option's `location` exactly."
 )
 _NEEDS = {
