@@ -8,6 +8,7 @@ Formats seen in the real data (check_apis.py output):
   "Monday\\t10 am - 6 pm\\n...Sunday\\tCLOSED"             weekly table, tabs
   empty / missing (about 9% of rows)
   "7:30am - dusk", "6am - dusk"                             a light-dependent end (3 rows)
+  "Temp Closed"                                             a closure notice (2 rows), read as closed
 Some weekly tables contain typos like "Tuesday: 10:00 pm - 7:00 pm"; we flag
 those as unclear instead of trusting them. Text with several different ranges whose days
 we do not read ("Weekdays - 12pm-Dusk Weekends 11am-Dusk") is open or closed only when every
@@ -29,6 +30,8 @@ _T = r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?"  # one clock time: hour, optional
 _SUN = r"(dawn|sunrise|dusk|sunset)"  # a time that moves with the seasons
 _POINT = rf"(?:{_T}|{_SUN})"  # a clock time or a sun word
 _RANGE = re.compile(rf"{_POINT}\s*(?:-|–|—|to)\s*{_POINT}", re.I)  # "8am-4pm", "10:00 am - 6 pm", "7:30am - dusk"
+# The whole hours text is a closure notice instead of hours: "Temp Closed", "Temporarily Closed", "Closed"
+_CLOSED_NOTICE = re.compile(r"(?:temp(?:orarily)?\.?\s+)?closed\.?", re.I)
 _DAY_LINE = re.compile(rf"^\s*({'|'.join(DAYS)})\b[\s:]*(.*)$", re.I)  # "Monday: ..." or "Monday<TAB>..."
 SEASONAL_WINTER_MONTHS = (11, 12, 1, 2, 3)  # when seasonal sites are often shut
 # The range a sun word covers in NYC over the year (minutes after midnight): sunset is
@@ -70,7 +73,7 @@ def _range(text: str) -> tuple | None:
 def parse_hours(text: str | None) -> dict:
     """Return {"kind", "days", "later_seasonally"}, plus "ranges" for kind "several".
 
-    kind: always | daily | weekly | several | none | unparsed
+    kind: always | daily | weekly | several | closed | none | unparsed
     days: {0..6: (open, close) | "closed" | "bad"}  (0 = Monday); each end is minutes or a sun word
     ranges: for "several" only, every (open, close) in the text
     """
@@ -81,6 +84,8 @@ def parse_hours(text: str | None) -> dict:
     later = "later seasonally" in low
     if re.search(r"24\s*hours?|24\s*/\s*7", low):
         return {"kind": "always", "days": {}, "later_seasonally": later}
+    if _CLOSED_NOTICE.fullmatch(raw):  # only the whole text: "Sunday: Closed" in a weekly table is a day off
+        return {"kind": "closed", "days": {}, "later_seasonally": False}
 
     # Weekly table: one line per day
     days: dict[int, object] = {}
@@ -152,6 +157,8 @@ def status_at(text: str | None, when: datetime) -> dict:
     kind = sched["kind"]
     if kind == "always":
         return {"state": "open", "reason": "open 24 hours"}
+    if kind == "closed":
+        return {"state": "closed", "reason": f"the city lists its hours as {(text or '').strip()!r}"}
     if kind == "none":
         return {"state": "unclear", "reason": "no hours are listed for this site"}
     if kind == "unparsed":
@@ -184,7 +191,7 @@ def hours_for_day(text: str | None, weekday: int) -> str:
     sched = parse_hours(text)
     if sched["kind"] == "always":
         return "24 hours"
-    if sched["kind"] in ("none", "unparsed", "several"):
+    if sched["kind"] in ("none", "unparsed", "several", "closed"):
         return "not listed" if sched["kind"] == "none" else (text or "")[:40]
     entry = sched["days"].get(weekday)
     if entry is None:

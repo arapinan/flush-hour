@@ -81,7 +81,7 @@ def test_helpers():
 
 
 def test_availability():
-    """The city's status and season columns overrule the listed hours."""
+    """The city's status and season columns overrule the listed hours, and a closure notice reads as closed."""
     base = {"status": "Operational", "open": "Year Round", "hours_of_operation": PARKS}
     assert availability(base, MON_AM)["state"] == "open"
     assert availability({**base, "status": "Closed for Construction"}, MON_AM)["state"] == "closed"
@@ -90,6 +90,11 @@ def test_availability():
     assert availability(seasonal, MON_AM)["state"] == "open" and availability(seasonal, MON_AM)["seasonal"]
     assert availability(seasonal, JAN_NOON)["state"] == "unclear"
     assert availability({**base, "open": None}, MON_AM)["state"] == "open"
+    temp = availability({**base, "hours_of_operation": "Temp Closed"}, MON_AM)       # real rows, status "Operational"
+    assert temp["state"] == "closed" and "Temp Closed" in temp["reason"]
+    assert parse_hours("Temporarily Closed")["kind"] == "closed" and parse_hours("Closed.")["kind"] == "closed"
+    assert state("Closed for the season", MON_AM) == "unclear"                        # not a plain closure notice
+    assert state(WEEKLY, MON_11) == "open"                                            # "Sunday: Closed" is a day off
 
 
 def test_osm_hours():
