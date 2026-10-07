@@ -24,7 +24,7 @@ Follow-ups worth trying in the same chat: `Will the first one be open Sunday nig
 | `find_restrooms` | Official NYC restrooms near a place, ranked by estimated walking time, skipping any that are closed at the requested time. Searches 800 m, widens to 2 km on its own if nothing is open, and respects a distance the user states. | NYC Open Data "Public Restrooms", NYC GeoSearch, OpenStreetMap Nominatim (business names) |
 | `restrooms_along_route` | Restrooms near a walk from A to B, ordered along the route, with detour cost, hours checked at arrival time, and the longest stretch without a stop. | same |
 | `check_open_status` | Weekly hours, open/closed/unclear at a given time, and the next opening time for one restroom. | same |
-| `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Only places with known opening hours are returned; volunteer listings get theirs from the same business on OpenStreetMap. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass, Nominatim) |
+| `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Only places with known opening hours are returned; volunteer listings get theirs from the same business on OpenStreetMap. Saved needs are applied like in `find_restrooms`. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass, Nominatim) |
 | `remember_needs` | Saves standing needs for the session so later searches apply them automatically. | session state |
 
 Tool-writing choices (from the tool-calling lecture):
@@ -46,7 +46,7 @@ The hours column has several formats (single daily range, weekly tables with col
 - `app.py`: FastAPI server, agent loop, sessions. `/chat` returns `response`, `session_id`, `tool_calls`.
 - `tools.py`: the five tools and their JSON schemas.
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
-- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options" (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). If nothing is confirmed open, the page suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
+- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options", places confirmed to meet the user's needs first, then by walking time (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). An explanation every card shares is shown once above them. If nothing is confirmed open, the page (not the model) suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
 - `check_apis.py`, `probe_geocoding.py`: developer scripts, not used by the app. `check_apis.py` prints a live response from each data source (the tests and the hours parser were written against its output); `probe_geocoding.py` shows how the location lookup handles tricky place names. Both need network access.
 

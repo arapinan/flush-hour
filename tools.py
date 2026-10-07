@@ -65,6 +65,8 @@ DUPLICATE_RADIUS_M = 40  # listings this close together are treated as the same 
 # off, so the name must agree too.
 HOURS_MATCH_RADIUS_M = 150
 MAX_HOURS_LOOKUPS = 8  # Nominatim lookups per fallback_options call (about one second each)
+# Each need -> the matching true/false field of a Refuge Restrooms listing (after _refuge_near)
+REFUGE_NEED_FIELDS = {"wheelchair": "wheelchair", "gender_neutral": "all_gender", "changing_station": "changing_station"}
 
 
 class ToolError(Exception):
@@ -469,8 +471,12 @@ def _need_check(site: dict, need: str) -> str:
 
 
 def _meets(site: dict, needs: list[str]) -> tuple[str, list[str]]:
-    """Overall 'yes' | 'no' | 'unknown', plus the needs the data could not confirm."""
-    checks = {n: _need_check(site, n) for n in needs}
+    """Overall 'yes' | 'no' | 'unknown' for an official site, plus the needs the data could not confirm."""
+    return _fit({n: _need_check(site, n) for n in needs})
+
+
+def _fit(checks: dict[str, str]) -> tuple[str, list[str]]:
+    """Per-need 'yes' | 'no' | 'unknown' -> overall verdict, plus the needs left unconfirmed."""
     if "no" in checks.values():
         return "no", []
     unconfirmed = [n for n, v in checks.items() if v == "unknown"]
@@ -769,7 +775,9 @@ def _osm_near(origin: tuple[float, float], radius_m: int) -> tuple[list[dict], l
                 "id": f"osm-{el['id']}",
                 "name": tags.get("name") or "Unnamed toilets (OpenStreetMap)",
                 "point": point,
-                "wheelchair": tags.get("wheelchair") == "yes",
+                # OSM's own yes / no answers (None when untagged), checked against the user's needs
+                "need_tags": {"wheelchair": tags.get("wheelchair"), "gender_neutral": tags.get("unisex"),
+                              "changing_station": tags.get("changing_table")},
                 "access": tags.get("access", "not stated"),
                 "fee": tags.get("fee", "not stated"),
                 "hours_raw": tags.get("opening_hours"),
@@ -812,35 +820,38 @@ def _nominatim_hours(name: str, point: tuple[float, float]) -> str | None:
     return _cached(key, 24 * 3600, lookup)["hours"]
 
 
-def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000, limit: int | None = None) -> dict:
+def fallback_options(state: dict, location: str, when: str | None = None, radius_m: int = 1000,
+                     needs: list | None = None, limit: int | None = None) -> dict:
     """Less reliable places to try, in three tiers, each with a confidence level.
 
     1. official sites whose hours are uncertain at `when`
     2. volunteer-listed businesses (Refuge Restrooms), with hours borrowed from OpenStreetMap
     3. OpenStreetMap toilets that list hours
+    Places that fail one of the user's needs are left out, as in find_restrooms.
     The two outside sources are best-effort: if one fails, the other tiers still answer.
     """
     origin, label = geocode(location)
     when_dt = _parse_when(when)
+    needs = _resolve_needs(state, needs)
     radius_m, limit = _clamp(radius_m, 200, 2000, 1000), _clamp(limit, 1, MAX_RESULTS, MAX_RESULTS)
     options: list[dict] = []
     official_points, confirmed_open = [], 0
 
-    # Tier 1: official sites with uncertain hours. Also note where every official site
-    # is, so the other tiers can skip listings of the same restroom.
+    # Tier 1: official sites with uncertain hours, in the same record as find_restrooms. Also
+    # note where every official site is, so the other tiers can skip listings of the same restroom.
     for site in nyc_sites():
         if haversine_m(origin, site["point"]) > radius_m:
+            continue
+        official_points.append(site["point"])
+        fit, unconfirmed = _meets(site, needs)
+        if fit == "no":
             continue
         verdict = availability(site["row"], when_dt)
         if verdict["state"] == "open":
             confirmed_open += 1
-        official_points.append(site["point"])
         if verdict["state"] == "unclear":
-            options.append({
-                "tier": "official_but_hours_uncertain", "confidence": "medium",
-                "id": site["id"], "name": site["name"], "walk_min": walk_minutes(grid_distance_m(origin, site["point"])),
-                "why_uncertain": verdict["reason"], "map_link": _maps_link(site["point"]),
-            })
+            record = _describe(site, grid_distance_m(origin, site["point"]), verdict, when_dt, unconfirmed)
+            options.append({"tier": "official_but_hours_uncertain", "confidence": "medium", **record})
 
     def near_official(point: tuple[float, float]) -> bool:
         return any(haversine_m(point, p) < DUPLICATE_RADIUS_M for p in official_points)
@@ -870,6 +881,9 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 continue
             if any(_same_business(r["name"], c["name"]) and haversine_m(r["point"], c["point"]) < DUPLICATE_RADIUS_M for c in candidates):
                 continue  # the same place listed twice
+            # Refuge stores an unticked box as false, which may only mean nobody reported it,
+            # so false leaves a need unconfirmed rather than ruling the place out
+            r["unconfirmed_needs"] = _fit({n: "yes" if r[REFUGE_NEED_FIELDS[n]] else "unknown" for n in needs})[1]
             # An old listing, or one with more downvotes than upvotes, is trusted less
             old = r["listing_age_years"] is not None and r["listing_age_years"] >= 5
             r["confidence"] = "low" if (old or r["downvotes"] > r["upvotes"]) else "medium"
@@ -879,9 +893,9 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     except requests.RequestException:
         pass  # best-effort, like the OSM tier: the other tiers still answer
 
-    # Find hours for the most trusted, nearest candidates first, on a budget of lookups
+    # Find hours for the candidates that meet the needs, then the most trusted and nearest, on a budget of lookups
     conf_rank = {"medium": 0, "low": 1}
-    candidates.sort(key=lambda r: (conf_rank[r["confidence"]], r["walk_min"]))
+    candidates.sort(key=lambda r: (bool(r["unconfirmed_needs"]), conf_rank[r["confidence"]], r["walk_min"]))
     lookups_left, with_hours, nominatim_failed = min(limit + 3, MAX_HOURS_LOOKUPS), 0, False
     for r in candidates:
         if with_hours >= limit:
@@ -896,7 +910,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
         if not hours_raw:
             continue  # no known hours: left out
         with_hours += 1
-        options.append({
+        option = {
             "tier": "community_listed", "confidence": r["confidence"],
             "id": r["id"], "name": r["name"], "address": r["address"], "walk_min": r["walk_min"],
             "wheelchair": r["wheelchair"], "all_gender": r["all_gender"], "changing_station": r["changing_station"],
@@ -906,34 +920,48 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
             "caveat": "Listed by volunteers; hours are from OpenStreetMap for this business, not verified by the city, "
                       "and the restroom may be for customers only.",
             "map_link": _maps_link(r["point"]),
-        })
-    # Tier 3: OpenStreetMap toilets that list hours and are not already covered above
+        }
+        if r["unconfirmed_needs"]:
+            option["unconfirmed_needs"] = r["unconfirmed_needs"]
+        options.append(option)
+    # Tier 3: OpenStreetMap toilets that list hours, meet the needs and are not already covered above
     if not osm_error:
         for o in osm_toilets:
             if near_official(o["point"]) or any(haversine_m(o["point"], p) < DUPLICATE_RADIUS_M for p in seen_points):
                 continue
             if not o["hours_raw"]:
                 continue
-            options.append({
+            tags = o["need_tags"]
+            fit, unconfirmed = _fit({n: tags[n] if tags[n] in ("yes", "no") else "unknown" for n in needs})
+            if fit == "no":
+                continue
+            option = {
                 "tier": "openstreetmap", "confidence": "low", "id": o["id"], "name": o["name"],
                 "walk_min": walk_minutes(grid_distance_m(origin, o["point"])),
-                "access": o["access"], "fee": o["fee"], "wheelchair": o["wheelchair"],
+                "access": o["access"], "fee": o["fee"], "wheelchair": tags["wheelchair"] == "yes",
+                "all_gender": tags["gender_neutral"] == "yes", "changing_station": tags["changing_station"] == "yes",
                 "hours_raw": o["hours_raw"], "map_link": _maps_link(o["point"]),
-            })
+            }
+            if unconfirmed:
+                option["unconfirmed_needs"] = unconfirmed
+            options.append(option)
 
-    # Most trustworthy tier first, then confidence, then the shortest walk
+    # Places confirmed to meet the needs first; within each group the most trustworthy tier,
+    # then confidence, then the shortest walk
     tier_rank = {"official_but_hours_uncertain": 0, "community_listed": 1, "openstreetmap": 2}
-    options.sort(key=lambda o: (tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
+    options.sort(key=lambda o: (bool(o.get("unconfirmed_needs")), tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
     out = {
         "searched_near": label,
         "at_time": _nyc_time_label(when_dt),
+        "needs_applied": needs,
         "official_sites_confirmed_open_nearby": confirmed_open,
         "options": options[:limit],
     }
     if confirmed_open:
         out["hint"] = f"{confirmed_open} official site(s) in range are confirmed open; find_restrooms lists them with details."
     if not options:
-        out["message"] = "Nothing found in range. Try a larger radius_m (up to 2000), or a different time."
+        needs_text = f" that meets the user's needs ({', '.join(n.replace('_', ' ') for n in needs)})" if needs else ""
+        out["message"] = f"Nothing found in range{needs_text}. Try a larger radius_m (up to 2000), or a different time."
     return out
 
 
@@ -1034,14 +1062,15 @@ TOOLS = [
             "Last-resort places to try when find_restrooms has nothing open or suitable: official sites whose hours "
             "are uncertain, volunteer-listed restrooms in businesses and campus buildings (with listing age and "
             "votes), and OpenStreetMap toilets. Only places with known opening hours are returned (hours_raw, from "
-            "OpenStreetMap, in its opening_hours format); compare them to the requested time yourself. Each option "
-            "carries a confidence and caveat; be honest with the user that these are less reliable. Call "
-            "find_restrooms first."
+            "OpenStreetMap, in its opening_hours format); compare them to the requested time yourself. Applies the "
+            "user's needs like find_restrooms. Each option carries a confidence and caveat; be honest with the user "
+            "that these are less reliable. Call find_restrooms first."
         ),
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": _LOCATION},
             "when": _WHEN,
             "radius_m": {"type": "integer", "description": "Search radius in meters, 200-2000. Default 1000."},
+            "needs": _NEEDS,
             "limit": {"type": "integer", "description": "Max options, 1-3. Default 3 (the most the page can show)."},
         }, "required": ["location"]},
     }},

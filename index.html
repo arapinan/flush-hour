@@ -75,6 +75,7 @@
   /* Results */
   .results { display: grid; gap: 0.6rem; margin: 0.7rem 0 0.3rem; }
   .results-head { font-size: 0.92rem; color: var(--muted); }
+  .results-note { font-size: 0.88rem; color: var(--muted); margin-top: -0.3rem; }
   .card { display: grid; grid-template-columns: 4.4rem 1fr; background: var(--glaze); border: 1px solid var(--grout); border-radius: 10px; overflow: hidden; }
   .tile { background: var(--porcelain); border-right: 1px solid var(--grout); display: grid; place-content: center; text-align: center; padding: 0.5rem 0.25rem; }
   .tile b { font-size: 1.9rem; font-weight: 900; line-height: 1; color: var(--green); }
@@ -195,7 +196,6 @@
   const NEED_LABEL = { wheelchair: "wheelchair access", changing_station: "a changing station", gender_neutral: "an all-gender restroom" };
   const STATUS_LABEL = { open: "Open", closed: "Closed", unclear: "Not sure" };
   const TIER_LABEL = {
-    official_but_hours_uncertain: "Official site, hours uncertain",
     community_listed: "Community-listed",
     openstreetmap: "OpenStreetMap",
   };
@@ -252,28 +252,39 @@
 
   // --- Result cards ---
 
-  // One restroom from a search. kind: "near" | "route" | "fallback"
-  function card(r, kind) {
+  // The one-line explanation under a card's name.
+  function noteOf(r) {
+    return r.status_note || r.caveat || r.address;
+  }
+
+  // Walking minutes for a card: from where the user is, or into the walk for a route stop.
+  function minutesOf(r, kind) {
+    return kind === "route" ? r.minutes_into_walk : r.walk_min;
+  }
+
+  // One restroom from a search. kind: "near" | "route" | "fallback".
+  // hideNote: the note is already shown once above the section, so leave it off the card.
+  function card(r, kind, hideNote) {
     const el = h("article", "card");
     // Left tile: the walking time
     const tile = h("div", "tile");
-    const minutes = kind === "route" ? r.minutes_into_walk : r.walk_min;
-    tile.appendChild(h("b", "", minutes ?? "?"));
+    tile.appendChild(h("b", "", minutesOf(r, kind) ?? "?"));
     tile.appendChild(h("span", "", kind === "route" ? "min into walk" : "min walk"));
     el.appendChild(tile);
 
     // Right side: name, a line of explanation, hours, then a row of tags
     const body = h("div", "body");
     body.appendChild(h("div", "name", r.name || "Restroom"));
-    const note = r.status_note || r.why_uncertain || r.caveat || r.address;
-    if (note) body.appendChild(h("div", "sub", note));
+    const note = noteOf(r);
+    if (note && !hideNote) body.appendChild(h("div", "sub", note));
     if (r.hours_that_day && r.hours_that_day !== "not listed") body.appendChild(h("div", "sub", "Hours that day: " + r.hours_that_day));
     if (r.hours_raw) body.appendChild(h("div", "sub", "Hours (OpenStreetMap): " + r.hours_raw));
 
     const row = h("div", "row");
     const pill = lock(r.status);
     if (pill) row.appendChild(pill);
-    if (r.tier) row.appendChild(h("span", "tag", TIER_LABEL[r.tier] + (r.confidence === "low" ? ", low confidence" : "")));
+    // Official sites already carry the status pill; the tier tag only marks the other sources
+    if (TIER_LABEL[r.tier]) row.appendChild(h("span", "tag", TIER_LABEL[r.tier] + (r.confidence === "low" ? ", low confidence" : "")));
     if (kind === "route" && r.extra_walk_min > 0) row.appendChild(h("span", "tag", "+" + r.extra_walk_min + " min detour"));
     if (r.seasonal) row.appendChild(h("span", "tag", "Seasonal"));
     for (const t of tagsFor(r)) row.appendChild(h("span", "tag", t));
@@ -364,14 +375,23 @@
     return box.childElementCount ? box : null;
   }
 
-  // The "Uncertain Options" section: everything held back above, without repeats.
+  // The "Uncertain Options" section: everything held back above, without repeats. Places
+  // confirmed to meet the user's needs come first, then the shortest walk.
   function renderUncertain(turn) {
     const seen = new Set();
-    const items = turn.uncertain.filter(({ r }) => !r.id || (!seen.has(r.id) && seen.add(r.id)));
+    const items = turn.uncertain
+      .filter(({ r }) => !r.id || (!seen.has(r.id) && seen.add(r.id)))
+      .sort((a, b) => Boolean(a.r.unconfirmed_needs?.length) - Boolean(b.r.unconfirmed_needs?.length)
+        || (minutesOf(a.r, a.kind) ?? Infinity) - (minutesOf(b.r, b.kind) ?? Infinity))
+      .slice(0, MAX_PER_SECTION);
     if (!items.length) return null;
     const box = h("section", "results");
     box.appendChild(h("div", "results-head", "Uncertain Options"));
-    for (const { r, kind } of items.slice(0, MAX_PER_SECTION)) box.appendChild(card(r, kind));
+    // When every card would say the same thing, say it once under the heading instead
+    const notes = items.map(({ r }) => noteOf(r));
+    const shared = items.length > 1 && notes[0] && notes.every(n => n === notes[0]);
+    if (shared) box.appendChild(h("div", "results-note", notes[0].charAt(0).toUpperCase() + notes[0].slice(1) + "."));
+    for (const { r, kind } of items) box.appendChild(card(r, kind, shared));
     return box;
   }
 

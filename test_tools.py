@@ -444,7 +444,26 @@ def test_fallback():
     CALLS["hours_down"] = False
 
 
+def test_fallback_applies_needs():
+    """fallback_options drops places that fail a need, ranks confirmed ones first, and uses find_restrooms' record."""
+    tools.MAX_RESULTS = 10                                                           # look past the cap
+    when = "2026-10-05T17:00"                                                        # past 4 PM: park sites are uncertain
+    plain = call("fallback_options", location="Columbia", when=when)
+    state = {}
+    call("remember_needs", state, needs=["wheelchair"])
+    out = call("fallback_options", state, location="Columbia", when=when)
+    tools.MAX_RESULTS = 3
+    assert "Wildlife Sanct. & 119 St Tennis Courts" in [o["name"] for o in plain["options"]]
+    names = [o["name"] for o in out["options"]]
+    assert out["needs_applied"] == ["wheelchair"]
+    assert "Wildlife Sanct. & 119 St Tennis Courts" not in names                    # Not Accessible
+    assert names.index("Anibal Aviles Playground") < names.index("Mystery Hours Park")  # confirmed before unknown
+    assert out["options"][names.index("Mystery Hours Park")]["unconfirmed_needs"] == ["wheelchair"]
+    official = next(o for o in out["options"] if o["name"] == "Anibal Aviles Playground")
+    assert official["status"] == "unclear" and official["hours_that_day"] and official["accessibility"] == "Fully Accessible"
+
+
 if __name__ == "__main__":
-    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback):
+    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_applies_needs):
         fn()
         print("ok", fn.__name__)
