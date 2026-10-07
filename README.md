@@ -33,13 +33,17 @@ Tool-writing choices (from the tool-calling lecture):
 - Tools that always run together are merged (geocode, search and hours check happen inside one call).
 - The harness fills in what the model should not have to: the current NYC time is added to each user turn, and saved needs are read from session state.
 - Place names that match more than one spot (a street in two boroughs, a bar with several branches) return a `needs_clarification` result; the agent asks which one, the page shows buttons, and the chosen option's coordinates are passed back so nothing is looked up twice.
-- Errors are JSON with a next step ("try a larger `radius_m`", "call `find_restrooms` first"), never a stack trace.
+- Errors are JSON with a next step ("retry with a larger `radius_m`", "ids come from earlier `find_restrooms` results; call one of those first"), never a stack trace.
 - Arguments are checked before a tool runs, and unreadable ones come back as an error the model can retry from; a bug inside a tool is never blamed on the arguments.
 - Results are small, focused JSON.
 
 ## How it handles messy data
 
-The hours column has several formats (single daily range, weekly tables with colons or tabs, "24 Hours", blanks) and some typos such as `Tuesday: 10:00 pm - 7:00 pm`. `hours.py` parses all of them and returns **open**, **closed**, or **unclear** with a reason, instead of guessing. `7:30am - dusk` is read using the earliest and latest dusk in NYC, so it is closed at 1 AM and unclear only in the evening. Text with several ranges whose days it cannot tell apart (`M-F 10:30am-5:15pm S-S 12:00pm-8:00pm`) counts as open or closed only when every range agrees. Seasonal sites are flagged in winter months. Community and OpenStreetMap places use OSM's `opening_hours` format (`Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00`); `hours.py` reads its common forms, including overnight ranges, days off, extra rules after a comma (`Mo-Su 11:00-21:00, Fr-Sa 11:00-22:00`) holiday closures like `Nov Th[4] off` (Thanksgiving), open-ended hours like `08:00-22:00+` (unclear after 10 PM until 4 AM, NYC's last call), and a listing that just says `"Temporarily closed"`; anything else is unclear. On 5,409 real Manhattan listings, about 1% are left unread. A closure rule it cannot date never makes a place look open: the regular hours still decide when it is closed. Walking time uses Manhattan's rotated street grid (about 29 degrees) rather than a straight line; it is an estimate, and the agent says so.
+The hours column has several formats (single daily range, weekly tables with colons or tabs, "24 Hours", blanks) and some typos such as `Tuesday: 10:00 pm - 7:00 pm`. `hours.py` parses all of them and returns **open**, **closed**, or **unclear** with a reason, instead of guessing. `7:30am - dusk` is read using the earliest and latest dusk in NYC, so it is closed at 1 AM and unclear only in the evening. Text with several ranges whose days it cannot tell apart (`M-F 10:30am-5:15pm S-S 12:00pm-8:00pm`) counts as open or closed only when every range agrees. Seasonal sites are flagged in winter months.
+
+Community and OpenStreetMap places use OSM's `opening_hours` format (`Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00`). `hours.py` reads its common forms, including overnight ranges, days off, extra rules after a comma (`Mo-Su 11:00-21:00, Fr-Sa 11:00-22:00`), holiday closures like `Nov Th[4] off` (Thanksgiving), open-ended hours like `08:00-22:00+` (unclear after 10 PM until 4 AM, NYC's last call), and a listing that just says `"Temporarily closed"`; anything else is unclear. A closure rule it cannot date never makes a place look open: the regular hours still decide when it is closed. On 5,409 real Manhattan listings, about 1% are left unread.
+
+Walking time uses Manhattan's rotated street grid (about 29 degrees) rather than a straight line; it is an estimate, and the agent says so.
 
 ## Files
 
@@ -48,6 +52,8 @@ The hours column has several formats (single daily range, weekly tables with col
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
 - `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options", in the same order as `fallback_options` (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). An explanation every card shares is shown once above them. If nothing is confirmed open, the page (not the model) suggests using the bathroom at home. With "Use my location" on, a place typed in the message still wins over GPS, and a "Searched near" line then says where the search ran. Each answer has a "How I found this" panel listing every tool call; tool errors appear only there, since they are written for the model, which retries or explains them in its reply.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
+- `pyproject.toml`, `uv.lock`: dependencies; `uv sync` installs the exact versions.
+- `submission.json`: the deployed URL and the authors' UNIs, for grading.
 - `check_apis.py`, `probe_geocoding.py`: developer scripts, not used by the app. `check_apis.py` prints a live response from each data source (the tests and the hours parser were written against its output); `probe_geocoding.py` shows how the location lookup handles tricky place names. Both need network access.
 
 ## Run locally

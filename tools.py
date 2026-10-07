@@ -13,6 +13,7 @@ Design rules from the tool-calling lecture:
   * the harness fills what the model should not have to (session needs, the clock)
   * tools that are always used together are merged (geocode + search + hours)
   * errors are JSON with an actionable next step, never a stack trace
+  * arguments are checked before a tool runs, so a bug inside a tool is never blamed on them
 """
 
 import hashlib
