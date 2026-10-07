@@ -76,6 +76,7 @@
   .results { display: grid; gap: 0.6rem; margin: 0.7rem 0 0.3rem; }
   .results-head { font-size: 0.92rem; color: var(--muted); }
   .results-note { font-size: 0.88rem; color: var(--muted); margin-top: -0.3rem; }
+  .searched-near { font-size: 0.88rem; color: var(--muted); margin: 0.6rem 0 0.2rem; }
   .card { display: grid; grid-template-columns: 4.4rem 1fr; background: var(--glaze); border: 1px solid var(--grout); border-radius: 10px; overflow: hidden; }
   .tile { background: var(--porcelain); border-right: 1px solid var(--grout); display: grid; place-content: center; text-align: center; padding: 0.5rem 0.25rem; }
   .tile b { font-size: 1.9rem; font-weight: 900; line-height: 1; color: var(--green); }
@@ -508,7 +509,7 @@
       // the GPS point was not used (and a wrong place is easy to spot)
       const calls = data.tool_calls || [];
       const place = sentLocation ? typedPlace(calls) : null;
-      if (place) bot.appendChild(h("div", "results-note", place));
+      if (place) bot.appendChild(h("div", "searched-near", place));
 
       // Below the reply: confirmed-open cards, then uncertain options, then the tool-call panel
       const certainMax = calls.some(c => c.name === "restrooms_along_route") ? MAX_ROUTE_STOPS : MAX_PER_SECTION;
