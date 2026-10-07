@@ -1,5 +1,5 @@
 """Offline tests for tools.py. Network calls are replaced by fixtures taken from the real
-check_apis.py output. Run: python3 test_tools.py
+check_apis.py output. Run: uv run python test_tools.py
 """
 import json
 
@@ -192,6 +192,7 @@ def call(name, state=None, **args):
 
 
 def test_find():
+    """find_restrooms: the result cap, closed sites left out, and open-first then nearest ordering."""
     assert len(call("find_restrooms", location="Broadway & 116th St", when="2026-10-05T11:00", limit=10)["results"]) == 3  # hard cap
     tools.MAX_RESULTS = 5                                                    # look past the cap to check the ordering
     out = call("find_restrooms", location="Broadway & 116th St", when="2026-10-05T11:00")  # Monday 11 AM
@@ -211,6 +212,7 @@ def test_find():
 
 
 def test_radius_widening():
+    """The automatic 800 m -> 2 km widening, an explicit radius never widened, and the advice when nothing is open."""
     far = "40.7545,-73.9769"  # about 1.6 km south of Midtown Plaza (24 hours)
     out = call("find_restrooms", location=far, when="2026-10-05T11:00")
     assert out["widened_from_m"] == 800 and out["radius_m_searched"] == 2000
@@ -224,6 +226,7 @@ def test_radius_widening():
 
 
 def test_needs_and_session_memory():
+    """Needs filter and rank results, remember_needs carries them across calls, and sessions stay separate."""
     tools.MAX_RESULTS = 5
     out = call("find_restrooms", location="40.8075,-73.9626", needs=["wheelchair"], when="2026-10-05T11:00")
     tools.MAX_RESULTS = 3
@@ -245,6 +248,7 @@ def test_needs_and_session_memory():
 
 
 def test_disambiguation():
+    """A name matching several places asks which one, and the chosen option resolves without a second lookup."""
     when = "2026-10-05T11:00"
     out = call("find_restrooms", location="Twin Tavern", when=when)              # business with two branches
     assert out["needs_clarification"] is True and "error" not in out
@@ -326,6 +330,7 @@ def test_services_agree_on_one_spot():
 
 
 def test_errors():
+    """Each kind of bad input comes back as a JSON error with advice, never an exception."""
     assert "Could not find" in call("find_restrooms", location="nowhere land")["error"]
     assert "outside New York City" in call("find_restrooms", location="34.05,-118.24")["error"]
     assert "Allowed values" in call("find_restrooms", location="Columbia", needs=["jacuzzi"])["error"]
@@ -374,6 +379,7 @@ def test_unreadable_arguments():
 
 
 def test_check_open_status():
+    """One restroom's status, weekly hours and next opening time at a given moment."""
     lib = next(r for r in call("find_restrooms", location="Columbia", when="2026-10-05T11:00")["results"]
                if r["name"] == "Morningside Library")
     sunday_night = call("check_open_status", restroom_id=lib["id"], when="2026-10-04T21:15")
@@ -383,6 +389,7 @@ def test_check_open_status():
 
 
 def test_route():
+    """Stops in walking order, the cap of 5, the longest gap, and hours judged at arrival time."""
     out = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T11:00")
     assert len(call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=1500, limit=8)["stops_in_walking_order"]) <= 5
     assert "error" not in out, out
@@ -398,6 +405,7 @@ def test_route():
 
 
 def test_fallback():
+    """The three fallback tiers: duplicates dropped, hours required, and outages answered quietly."""
     out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")   # 1 AM Monday
     assert len(out["options"]) <= 3                                                  # default limit is 3
     names = [o["name"] for o in out["options"]]

@@ -408,6 +408,7 @@ _ACCESS = {
 
 
 def _yes_no_unknown(value: bool | None) -> str:
+    """True / False / None (the data does not say) -> 'yes' / 'no' / 'unknown'."""
     return "unknown" if value is None else ("yes" if value else "no")
 
 

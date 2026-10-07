@@ -1,5 +1,5 @@
 """Offline tests for hours.py and geo.py using strings from the real dataset.
-Run: python3 test_core.py
+Run: uv run python test_core.py
 """
 from datetime import datetime
 
@@ -22,10 +22,12 @@ TYPO = ("Sunday: Closed \nMonday: 10:00 am - 7:00 pm \nTuesday: 10:00 pm - 7:00 
 
 
 def state(text, when):
+    """Just the open | closed | unclear part of status_at."""
     return status_at(text, when)["state"]
 
 
 def test_hours():
+    """Every hours format in the real data, including seasonal, overnight and typo ranges."""
     assert parse_hours(PARKS)["kind"] == "daily" and parse_hours(PARKS)["later_seasonally"]
     assert parse_hours(WEEKLY)["kind"] == "weekly" and parse_hours(TABS)["kind"] == "weekly"
     assert parse_hours(None)["kind"] == "none" and parse_hours("")["kind"] == "none"
@@ -51,6 +53,7 @@ def test_hours():
 
 
 def test_helpers():
+    """Per-day hours strings and the next opening time."""
     assert hours_for_day(WEEKLY, 0) == "10 AM – 6 PM" and hours_for_day(WEEKLY, 6) == "Closed"
     assert next_open(WEEKLY, SUN) == "Monday at 10 AM"
     assert next_open(PARKS, MON_5PM) == "Tuesday at 8 AM"
@@ -59,6 +62,7 @@ def test_helpers():
 
 
 def test_availability():
+    """The city's status and season columns overrule the listed hours."""
     base = {"status": "Operational", "open": "Year Round", "hours_of_operation": PARKS}
     assert availability(base, MON_AM)["state"] == "open"
     assert availability({**base, "status": "Closed for Construction"}, MON_AM)["state"] == "closed"
@@ -70,6 +74,7 @@ def test_availability():
 
 
 def test_geo():
+    """Grid walking distance, walking minutes, and position along and detour from a route."""
     columbia, astor = (40.8075, -73.9626), (40.7296, -73.9912)
     assert in_nyc(columbia) and not in_nyc((34.05, -118.24))
     straight, grid = haversine_m(columbia, astor), grid_distance_m(columbia, astor)
