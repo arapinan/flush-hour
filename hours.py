@@ -193,12 +193,19 @@ def availability(row: dict, when: datetime) -> dict:
 #   "24/7"
 #   "Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00; Su 12:00-24:00"
 #   "Mo-Fr 08:00-12:00,13:00-17:00; Sa,Su off; PH off"
-# Only this common subset is read. Anything else (months, "sunset", "10:00+") is unclear
-# rather than guessed. Ranges here are minutes after midnight; a close past 1440 runs overnight.
+#   "10:00-17:00; We off; Nov Th[4] off; Dec 25 off"      holiday closures (the Met)
+# Only this common subset is read. Anything else (month ranges, "sunset", "10:00+") is unclear
+# rather than guessed, except a rule that only closes the place: it can never make a closed
+# place open, so the regular hours still decide "closed". Ranges here are minutes after
+# midnight; a close past 1440 runs overnight.
 
 OSM_DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]  # index = datetime.weekday()
+OSM_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 _OSM_RULE = re.compile(r"(?:([A-Za-z]{2}(?:\s*[-,]\s*[A-Za-z]{2})*)\s+)?(.+)")  # optional days, then times
 _OSM_RANGE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")  # "12:00-01:00"
+_OSM_CLOSURE = re.compile(r"(.+?)\s+(?:off|closed)", re.I)  # "Dec 25 off"
+# One date: "Dec 25", or the nth weekday of a month, "Nov Th[4]" (Thanksgiving) or "May Mo[-1]" (the last)
+_OSM_DATE = re.compile(rf"({'|'.join(OSM_MONTHS)})\s+(?:(\d{{1,2}})|({'|'.join(OSM_DAYS)})\[(-?[1-5])\])")
 
 
 def _osm_days(text: str) -> list[int] | None:
@@ -213,21 +220,49 @@ def _osm_days(text: str) -> list[int] | None:
     return days
 
 
-def parse_osm_hours(text: str | None) -> dict[int, list[tuple[int, int]]] | None:
-    """OSM opening_hours -> {weekday: [(open, close), ...]}, or None if it is not in the subset we read.
+def _on_date(closure: tuple, day: datetime) -> bool:
+    """Does a closure from _OSM_DATE (month, day of month, weekday, nth) fall on `day`?"""
+    month, day_of_month, weekday, nth = closure
+    if day.month != OSM_MONTHS.index(month) + 1:
+        return False
+    if day_of_month:
+        return day.day == int(day_of_month)
+    if day.weekday() != OSM_DAYS.index(weekday):
+        return False
+    n = int(nth)
+    if n < 0:  # [-1]: the last one in the month, so a week later is next month
+        return (day + timedelta(days=7)).month != day.month
+    return (day.day - 1) // 7 + 1 == n
 
-    A day no rule mentions is closed, as in OSM. A later rule replaces an earlier one for its days.
+
+def parse_osm_hours(text: str | None) -> dict | None:
+    """OSM opening_hours -> {"week", "closed_dates", "unread_closures"}, or None if it is not in the subset we read.
+
+    week: {weekday: [(open, close), ...]}. A day no rule mentions is closed, as in OSM, and a
+    later rule replaces an earlier one for its days.
+    closed_dates: holiday closures we can check (_OSM_DATE groups).
+    unread_closures: True if some other rule closes the place on dates we cannot work out.
     """
     raw = (text or "").strip()
     if not raw:
         return None
     if raw == "24/7":
-        return {d: [(0, 1440)] for d in range(7)}
+        return {"week": {d: [(0, 1440)] for d in range(7)}, "closed_dates": [], "unread_closures": False}
     week: dict[int, list[tuple[int, int]]] = {}
+    closed_dates, unread_closures = [], False
     for rule in filter(None, (r.strip() for r in raw.split(";"))):
-        days_text, times_text = _OSM_RULE.fullmatch(rule).groups()
-        if days_text and days_text.upper().startswith("PH"):
+        if rule.upper().startswith("PH"):
             continue  # public holidays: ignored
+        # A closure on dates rather than weekdays ("Dec 25 off", "Easter off")
+        closure = _OSM_CLOSURE.fullmatch(rule)
+        if closure and _osm_days(closure.group(1)) is None:
+            date = _OSM_DATE.fullmatch(closure.group(1))
+            if date:
+                closed_dates.append(date.groups())
+            else:
+                unread_closures = True
+            continue
+        days_text, times_text = _OSM_RULE.fullmatch(rule).groups()
         days = _osm_days(days_text) if days_text else list(range(7))
         if days is None:
             return None
@@ -242,22 +277,34 @@ def parse_osm_hours(text: str | None) -> dict[int, list[tuple[int, int]]] | None
                 ranges.append((start, end if end > start else end + 1440))  # "12:00-01:00" runs past midnight
         for d in days:
             week[d] = ranges
-    return week
+    return {"week": week, "closed_dates": closed_dates, "unread_closures": unread_closures}
 
 
 def osm_status_at(text: str | None, when: datetime) -> dict:
     """Do these OSM hours say the place is open at `when`? -> {"state", "reason"}, like status_at."""
     if (text or "").strip() == "24/7":
         return {"state": "open", "reason": "listed hours say open 24/7"}
-    week = parse_osm_hours(text)
-    if week is None:
+    hours = parse_osm_hours(text)
+    if hours is None:
         return {"state": "unclear", "reason": f"could not interpret the listed hours: {(text or '')[:60]!r}"}
+    week = hours["week"]
+
+    def open_on(day: datetime, end: int) -> dict:
+        """The verdict for a range that covers `when` and belongs to `day`, after the date closures."""
+        if any(_on_date(c, day) for c in hours["closed_dates"]):
+            return {"state": "closed", "reason": "listed hours say closed on this date"}
+        if hours["unread_closures"]:
+            reason = f"listed hours say open until {fmt(end)}, but some closing dates could not be checked"
+            return {"state": "unclear", "reason": reason}
+        return {"state": "open", "reason": f"listed hours say open until {fmt(end)}"}
+
     minute, day = when.hour * 60 + when.minute, when.weekday()
     # Today's ranges, then yesterday's ranges that run past midnight into today
     for start, end in week.get(day, []):
         if start <= minute < end:
-            return {"state": "open", "reason": f"listed hours say open until {fmt(end)}"}
+            return open_on(when, end)
+    yesterday = when - timedelta(days=1)
     for start, end in week.get((day - 1) % 7, []):
         if minute < end - 1440:
-            return {"state": "open", "reason": f"listed hours say open until {fmt(end)}"}
+            return open_on(yesterday, end)
     return {"state": "closed", "reason": "listed hours say closed at this time"}

@@ -51,6 +51,13 @@ REFUGE = [
      "updated_at": "2023-05-01T00:00:00Z", "downvote": 0, "upvote": 4, "changing_table": False, "approved": True},
     {"id": 41001, "name": "Hungarian Pastry Shop", "street": "1030 Amsterdam Ave", "city": "New York",   # listed twice
      "latitude": 40.80381, "longitude": -73.96361, "updated_at": "2022-01-01T00:00:00Z", "upvote": 1, "downvote": 0, "approved": True},
+    # One big site with two pins ~165 m apart, like the Met: the newer, better-voted one should be kept
+    {"id": 50000, "name": "Cathedral of St. John the Divine", "street": "1047 Amsterdam Ave", "city": "New York",
+     "accessible": True, "unisex": True, "latitude": 40.80300, "longitude": -73.96150,
+     "updated_at": "2015-01-01T00:00:00Z", "upvote": 1, "downvote": 0, "approved": True},
+    {"id": 50001, "name": "Cathedral of St. John the Divine", "street": "1047 Amsterdam Ave", "city": "New York",
+     "accessible": True, "unisex": True, "latitude": 40.80430, "longitude": -73.96250,
+     "updated_at": "2024-01-01T00:00:00Z", "upvote": 3, "downvote": 0, "approved": True},
     {"id": 99999, "name": "Same spot as Anibal Aviles", "latitude": 40.80120, "longitude": -73.96281,
      "updated_at": "2024-01-01T00:00:00Z", "upvote": 1, "downvote": 0, "approved": True},
 ]
@@ -101,6 +108,9 @@ def fake_get(url, params=None, timeout=10):
             return [{"lat": "40.80358", "lon": "-73.96368", "name": "Hungarian Pastry Shop", "extratags": {"opening_hours": "Mo-Su 08:00-23:30"}}]
         if params["q"] == "Arts and Crafts Beer Parlor":
             return [{"lat": "40.80680", "lon": "-73.96120", "name": "Arts & Crafts Beer Parlor", "extratags": {"opening_hours": "Mo-Su 12:00-02:00"}}]
+        if params["q"] == "Cathedral of St. John the Divine":
+            return [{"lat": "40.80390", "lon": "-73.96190", "name": "Cathedral of St. John the Divine",
+                     "extratags": {"opening_hours": "Mo-Su 09:00-17:00; Dec 25 off"}}]
         if params["q"].startswith("Columbia's"):   # a different business next door, and the right name too far away
             return [{"lat": "40.80810", "lon": "-73.96395", "name": "Unrelated Pharmacy", "extratags": {"opening_hours": "Mo-Fr 09:00-21:00"}},
                     {"lat": "40.81100", "lon": "-73.96395", "name": "Columbia's Morningside Campus", "extratags": {"opening_hours": "24/7"}}]
@@ -479,7 +489,18 @@ def test_fallback_listed_hours():
     assert ranks == sorted(ranks)                                                    # listed open before uncertain
 
 
+def test_one_site_listed_twice():
+    """Two volunteer pins for one big site are shown once, keeping the newer, better-voted listing."""
+    tools._cache.clear()
+    tools.MAX_RESULTS = 10                                                           # look past the cap
+    out = call("fallback_options", location="Columbia", when="2026-10-05T12:00")    # noon Monday: it is open
+    tools.MAX_RESULTS = 3
+    copies = [o for o in out["options"] if o["name"] == "Cathedral of St. John the Divine"]
+    assert [o["id"] for o in copies] == ["refuge-50001"], copies
+    assert copies[0]["listed_hours_status"] == "open"
+
+
 if __name__ == "__main__":
-    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_fallback_applies_needs):
+    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_one_site_listed_twice, test_fallback_applies_needs):
         fn()
         print("ok", fn.__name__)

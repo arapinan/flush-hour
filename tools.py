@@ -61,6 +61,9 @@ MAX_ROUTE_STOPS = 5
 
 # fallback_options matching
 DUPLICATE_RADIUS_M = 40  # listings this close together are treated as the same place
+# Listings with exactly the same name are the same place even this far apart: one big site
+# (the Met) can carry several volunteer pins.
+SAME_NAME_RADIUS_M = 250
 # Community listing -> OSM business with hours. Volunteer pins are often tens of meters
 # off, so the name must agree too.
 HOURS_MATCH_RADIUS_M = 150
@@ -795,6 +798,21 @@ def _same_business(name_a: str, name_b: str) -> bool:
     return bool(a and b and len(a & b) / min(len(a), len(b)) >= 0.5)
 
 
+def _same_place(a: dict, b: dict) -> bool:
+    """Are two community listings the same place? Near-identical pins with matching names, or
+    exactly the same name on one big site."""
+    distance = haversine_m(a["point"], b["point"])
+    if distance < DUPLICATE_RADIUS_M and _same_business(a["name"], b["name"]):
+        return True
+    return distance < SAME_NAME_RADIUS_M and _tokens(a["name"]) == _tokens(b["name"])
+
+
+def _trust(listing: dict) -> tuple:
+    """Sort key for which of two copies of a listing to keep: higher confidence, then net votes, then newer."""
+    age = listing["listing_age_years"]
+    return listing["confidence"] == "medium", listing["upvotes"] - listing["downvotes"], -(age if age is not None else 99)
+
+
 def _nominatim_hours(name: str, point: tuple[float, float]) -> str | None:
     """Opening hours for a community-listed business, by searching its name in a small box around the
     listing (so a chain matches the branch at this spot, not one across town). Volunteer-entered coordinates
@@ -880,8 +898,6 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
         for r in _refuge_near(origin):
             if haversine_m(origin, r["point"]) > radius_m or near_official(r["point"]):
                 continue
-            if any(_same_business(r["name"], c["name"]) and haversine_m(r["point"], c["point"]) < DUPLICATE_RADIUS_M for c in candidates):
-                continue  # the same place listed twice
             # Refuge stores an unticked box as false, which may only mean nobody reported it,
             # so false leaves a need unconfirmed rather than ruling the place out
             r["unconfirmed_needs"] = _fit({n: "yes" if r[REFUGE_NEED_FIELDS[n]] else "unknown" for n in needs})[1]
@@ -889,8 +905,13 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
             old = r["listing_age_years"] is not None and r["listing_age_years"] >= 5
             r["confidence"] = "low" if (old or r["downvotes"] > r["upvotes"]) else "medium"
             r["walk_min"] = walk_minutes(grid_distance_m(origin, r["point"]))
-            candidates.append(r)
-            seen_points.append(r["point"])
+            seen_points.append(r["point"])  # every pin, so OpenStreetMap toilets near any copy are skipped
+            # The same place listed twice: keep only the more trustworthy listing
+            twin = next((c for c in candidates if _same_place(r, c)), None)
+            if twin is None:
+                candidates.append(r)
+            elif _trust(r) > _trust(twin):
+                candidates[candidates.index(twin)] = r
     except requests.RequestException:
         pass  # best-effort, like the OSM tier: the other tiers still answer
 

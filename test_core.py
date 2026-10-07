@@ -74,7 +74,7 @@ def test_availability():
 
 
 def test_osm_hours():
-    """OpenStreetMap opening_hours: overnight ranges, days off, wrapping day spans, and formats we do not read."""
+    """OpenStreetMap opening_hours: overnight ranges, days off, holiday closures, and formats we do not read."""
     tavern = "Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00; Su 12:00-24:00"
     assert osm_status_at(tavern, datetime(2026, 10, 6, 22, 0))["state"] == "open"      # Tuesday 10 PM
     assert osm_status_at(tavern, datetime(2026, 10, 6, 1, 0))["state"] == "closed"     # Monday's hours end at midnight
@@ -83,11 +83,20 @@ def test_osm_hours():
     assert osm_status_at(weekdays, MON_11)["state"] == "open"
     assert osm_status_at(weekdays, datetime(2026, 10, 5, 12, 30))["state"] == "closed"  # lunch break
     assert osm_status_at(weekdays, datetime(2026, 10, 10, 10, 0))["state"] == "closed"  # Saturday off
-    assert parse_osm_hours("Fr-Mo 09:00-17:00")[6] == [(540, 1020)]                     # span wraps past Sunday
+    assert parse_osm_hours("Fr-Mo 09:00-17:00")["week"][6] == [(540, 1020)]                     # span wraps past Sunday
     assert osm_status_at("24/7", MON_1AM)["state"] == "open"
     assert osm_status_at("Mo-Fr 10:00+", MON_11)["state"] == "unclear"                  # open-ended: not guessed
     assert osm_status_at("Jan-Mar Mo-Fr 09:00-17:00", MON_11)["state"] == "unclear"     # months: not read
     assert osm_status_at(None, MON_11)["state"] == "unclear"
+
+    met = "10:00-17:00; Fr-Sa 10:00-21:00; We off; May Mo[1] off; Nov Th[4] off; Dec 25 off; Jan 01 off"  # real listing
+    assert osm_status_at(met, MON_1AM)["state"] == "closed"                             # holiday rules can't open it
+    assert osm_status_at(met, MON_11)["state"] == "open"
+    assert osm_status_at(met, datetime(2026, 11, 26, 12, 0))["state"] == "closed"       # Thanksgiving: 4th Thursday
+    assert osm_status_at(met, datetime(2026, 12, 25, 12, 0))["state"] == "closed"
+    assert osm_status_at(met, datetime(2026, 5, 4, 12, 0))["state"] == "closed"         # first Monday in May
+    easter = "10:00-17:00; Easter off"                                                  # a closure we can't date
+    assert osm_status_at(easter, MON_11)["state"] == "unclear" and osm_status_at(easter, MON_1AM)["state"] == "closed"
 
 
 def test_geo():
