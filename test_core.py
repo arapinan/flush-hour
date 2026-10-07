@@ -93,7 +93,7 @@ def test_availability():
 
 
 def test_osm_hours():
-    """OpenStreetMap opening_hours: overnight ranges, days off, holiday closures, and formats we do not read."""
+    """OSM opening_hours: overnight ranges, days off, extra rules, holidays, "+", notices, and formats we skip."""
     tavern = "Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00; Su 12:00-24:00"
     assert osm_status_at(tavern, datetime(2026, 10, 6, 22, 0))["state"] == "open"      # Tuesday 10 PM
     assert osm_status_at(tavern, datetime(2026, 10, 6, 1, 0))["state"] == "closed"     # Monday's hours end at midnight
@@ -114,6 +114,22 @@ def test_osm_hours():
     assert osm_status_at(met, datetime(2026, 11, 26, 12, 0))["state"] == "closed"       # Thanksgiving: 4th Thursday
     assert osm_status_at(met, datetime(2026, 12, 25, 12, 0))["state"] == "closed"
     assert osm_status_at(met, datetime(2026, 5, 4, 12, 0))["state"] == "closed"         # first Monday in May
+    harbs = "Mo-Su 11:00-21:00, Fr-Sa 11:00-22:00"                                      # comma: an additional rule
+    assert osm_status_at(harbs, datetime(2026, 10, 7, 1, 0))["state"] == "closed"       # Wednesday 1 AM
+    assert osm_status_at(harbs, datetime(2026, 10, 9, 21, 30))["state"] == "open"       # Friday runs to 10 PM
+    assert osm_status_at(harbs, datetime(2026, 10, 7, 21, 30))["state"] == "closed"     # Wednesday ends at 9 PM
+    assert parse_osm_hours("Mo,We 10:00-12:00")["week"] == {0: [(600, 720)], 2: [(600, 720)]}  # a comma in days
+    late = "Mo-Su 08:00-22:00+"                                                         # "+": no closing time
+    assert osm_status_at(late, MON_11)["state"] == "open" and "at least 10 PM" in osm_status_at(late, MON_11)["reason"]
+    assert osm_status_at(late, datetime(2026, 10, 5, 23, 0))["state"] == "unclear"      # may still be open
+    assert osm_status_at(late, datetime(2026, 10, 6, 2, 0))["state"] == "unclear"       # before 4 AM last call
+    assert osm_status_at(late, datetime(2026, 10, 6, 5, 0))["state"] == "closed"        # after last call
+    assert osm_status_at("17:00+", MON_11)["state"] == "closed"                         # before it opens
+    assert osm_status_at("17:00+", datetime(2026, 10, 5, 18, 0))["state"] == "unclear"
+    bar = "Mo-Th 17:00-01:00+, Fr 16:00-02:00+"                                         # "+" before an extra rule
+    assert osm_status_at(bar, datetime(2026, 10, 6, 0, 30))["state"] == "open"
+    assert osm_status_at('"Temporarily closed"', MON_11)["state"] == "closed"           # a notice, not hours
+    assert osm_status_at('"closed for the winter"', MON_11)["state"] == "unclear"       # not a plain closure
     easter = "10:00-17:00; Easter off"                                                  # a closure we can't date
     assert osm_status_at(easter, MON_11)["state"] == "unclear" and osm_status_at(easter, MON_1AM)["state"] == "closed"
 
