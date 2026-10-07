@@ -2,6 +2,7 @@
 check_apis.py output. Run: uv run python test_tools.py
 """
 import json
+from datetime import datetime, timedelta
 
 import requests
 
@@ -267,6 +268,22 @@ def test_nearest_closed_meets_needs():
     assert out["closed_nearby_omitted"] == plain["closed_nearby_omitted"] - 1   # it is not counted either
 
 
+def test_recommend():
+    """Each search names the result to suggest, in the page's order, so the reply can match the first card."""
+    near = call("find_restrooms", location="Broadway & 116th St", when="2026-10-05T11:00")
+    assert near["recommend"] == near["results"][0]["name"]
+    needs = call("find_restrooms", location="Broadway & 116th St", needs=["wheelchair"], when="2026-10-05T11:00")
+    top = next(r for r in needs["results"] if r["name"] == needs["recommend"])
+    assert "unconfirmed_needs" not in top                                           # needs met beats closer
+    route = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T11:00")
+    first_open = next(s for s in route["stops_in_walking_order"] if s["status"] == "open")
+    assert route["recommend"] == first_open["name"]                                 # earliest open stop
+    fallback = call("fallback_options", location="Columbia", when="2026-10-05T22:00")
+    assert fallback["recommend"] == fallback["options"][0]["name"]
+    empty = call("find_restrooms", location="40.7545,-73.9769", radius_m=800, when="2026-10-05T11:00")
+    assert empty["results"] == [] and "recommend" not in empty                     # nothing to name
+
+
 def test_disambiguation():
     """A name matching several places asks which one, and the chosen option resolves without a second lookup."""
     when = "2026-10-05T11:00"
@@ -409,7 +426,7 @@ def test_check_open_status():
 
 
 def test_route():
-    """Stops in walking order, the cap of 5, the longest gap, and hours judged at arrival time."""
+    """Stops in walking order, the cap of 5, the longest gap, hours judged at arrival time, and the arrival time at the end."""
     out = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T11:00")
     assert len(call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=1500, limit=8)["stops_in_walking_order"]) <= 5
     assert "error" not in out, out
@@ -422,6 +439,10 @@ def test_route():
     late = call("restrooms_along_route", start="Columbia", end="Astor Place", max_detour_m=400, when="2026-10-05T15:30")
     assert late["closed_on_arrival_omitted"] >= 0 and "error" not in late
     assert "within a couple of minutes" in call("restrooms_along_route", start="Columbia", end="Columbia")["error"]
+    # A follow-up search near the end must check hours for when the walker gets there, not for now
+    assert out["arrive_at_end"] == (datetime(2026, 10, 5, 11, 0) + timedelta(minutes=out["walk_min_total"])).strftime("%Y-%m-%dT%H:%M")
+    empty = call("restrooms_along_route", start="40.7000,-73.9300", end="40.7100,-73.9300", when="2026-10-07T00:40")
+    assert empty["stops_in_walking_order"] == [] and f"when='{empty['arrive_at_end']}'" in empty["message"]
 
 
 def test_fallback():
@@ -511,6 +532,6 @@ def test_one_site_listed_twice():
 
 
 if __name__ == "__main__":
-    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_nearest_closed_meets_needs, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_one_site_listed_twice, test_fallback_applies_needs):
+    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_nearest_closed_meets_needs, test_recommend, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_one_site_listed_twice, test_fallback_applies_needs):
         fn()
         print("ok", fn.__name__)

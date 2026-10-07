@@ -14,6 +14,7 @@ Design rules from the tool-calling lecture:
   * tools that are always used together are merged (geocode + search + hours)
   * errors are JSON with an actionable next step, never a stack trace
   * arguments are checked before a tool runs, so a bug inside a tool is never blamed on them
+  * each search names the result to suggest (`recommend`), so the model copies a choice instead of ranking
 """
 
 import hashlib
@@ -576,6 +577,8 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
         "results": results,
         "closed_nearby_omitted": len(closed),
     }
+    if results:
+        out["recommend"] = results[0]["name"]  # already in the page's order: needs met, open, shortest walk
     if widened_from:
         out["widened_from_m"] = widened_from  # tell the user the search was widened automatically
     if closed:
@@ -617,6 +620,7 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
             "Use find_restrooms near the start instead."
         )
     total_min = walk_minutes(total_m)
+    arrive_at_end = (when_dt + timedelta(minutes=total_min)).strftime("%Y-%m-%dT%H:%M")
 
     # Keep sites that add little extra walking and are not closed when the walker gets there
     found, closed = [], 0
@@ -653,20 +657,27 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
     # Longest stretch between consecutive stops, counting the start and the end of the walk
     fractions = [0.0] + [s["percent_of_way"] / 100 for s in stops] + [1.0]
     longest_gap = max(y - x for x, y in zip(fractions, fractions[1:])) * total_min
+    # The stop to suggest, in the page's order: needs met, then open, then the earliest along the walk
+    best = min(range(len(picked)), key=lambda i: (picked[i][5] != "yes", picked[i][3]["state"] != "open", i), default=None)
     out = {
         "route": f"{start_label} → {end_label}",
         "walk_min_total": total_min,
         "leaving_at": _nyc_time_label(when_dt, "%A %H:%M"),
+        # When the walker reaches the end: a follow-up search there must use this time, not "now"
+        "arrive_at_end": arrive_at_end,
         "needs_applied": needs,
         "stops_in_walking_order": stops,
         "longest_stretch_without_a_stop_min": int(round(longest_gap)),
         "closed_on_arrival_omitted": closed,
         "note": "Route is approximated as a grid walk between the two points, not turn-by-turn directions.",
     }
+    if best is not None:
+        out["recommend"] = stops[best]["name"]
     if not stops:
         out["message"] = (
             f"No official restroom within {max_detour_m} m of the route is open when you would pass it. "
-            "Try a larger max_detour_m (up to 1500) or call fallback_options near the middle of the route."
+            f"Try a larger max_detour_m (up to 1500), or call fallback_options near the end of the route with "
+            f"when='{arrive_at_end}', the time the walker gets there, so hours are checked for then and not now."
         )
     return out
 
@@ -988,6 +999,8 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
         "official_sites_confirmed_open_nearby": confirmed_open,
         "options": options[:limit],
     }
+    if options:
+        out["recommend"] = options[0]["name"]  # sorted above in the page's order
     if confirmed_open:
         out["hint"] = f"{confirmed_open} official site(s) in range are confirmed open; find_restrooms lists them with details."
     if not options:

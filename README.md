@@ -22,7 +22,7 @@ Follow-ups worth trying in the same chat: `Will the first one be open Sunday nig
 | Tool | What it does | Data |
 |---|---|---|
 | `find_restrooms` | Official NYC restrooms near a place, ranked by estimated walking time, skipping any that are closed at the requested time. Searches 800 m, widens to 2 km on its own if nothing is open, and respects a distance the user states. | NYC Open Data "Public Restrooms", NYC GeoSearch, OpenStreetMap Nominatim (business names) |
-| `restrooms_along_route` | Restrooms near a walk from A to B, ordered along the route, with detour cost, hours checked at arrival time, and the longest stretch without a stop. | same |
+| `restrooms_along_route` | Restrooms near a walk from A to B, ordered along the route, with detour cost, hours checked at arrival time, and the longest stretch without a stop. If nothing is open on the way, it gives the arrival time at the end, so a follow-up search there checks hours for then, not now. | same |
 | `check_open_status` | Weekly hours, open/closed/unclear at a given time, and the next opening time for one restroom. | same |
 | `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Only places with known opening hours are returned; volunteer listings get theirs from the same business on OpenStreetMap. Those hours are checked against the requested time, and places they say are closed are left out. A place listed more than once (the Met has two volunteer pins) is shown once. Saved needs are applied like in `find_restrooms`. Results are ordered: needs met, then hours that say open, then uncertain hours, then walking time. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass, Nominatim) |
 | `remember_needs` | Saves standing needs for the session so later searches apply them automatically. | session state |
@@ -35,6 +35,7 @@ Tool-writing choices (from the tool-calling lecture):
 - Place names that match more than one spot (a street in two boroughs, a bar with several branches) return a `needs_clarification` result; the agent asks which one, the page shows buttons, and the chosen option's coordinates are passed back so nothing is looked up twice.
 - Errors are JSON with a next step ("retry with a larger `radius_m`", "ids come from earlier `find_restrooms` results; call one of those first"), never a stack trace.
 - Arguments are checked before a tool runs, and unreadable ones come back as an error the model can retry from; a bug inside a tool is never blamed on the arguments.
+- Each search names the result to suggest (`recommend`), picked in the same order the page shows its cards, so the reply and the first card agree; the model copies a name instead of ranking results itself.
 - Results are small, focused JSON.
 
 ## How it handles messy data
