@@ -7,8 +7,10 @@ Formats seen in the real data (check_apis.py output):
   "Sunday: Closed \\nMonday: 10:00 am - 6:00 pm \\n..."   weekly table
   "Monday\\t10 am - 6 pm\\n...Sunday\\tCLOSED"             weekly table, tabs
   empty / missing (about 9% of rows)
+  "7:30am - dusk", "6am - dusk"                             a light-dependent end (3 rows)
 Some weekly tables contain typos like "Tuesday: 10:00 pm - 7:00 pm"; we flag
-those as unclear instead of trusting them.
+those as unclear instead of trusting them, and text with several different ranges
+("Weekdays - 12pm-Dusk Weekends 11am-Dusk") is unclear rather than half-read.
 
 Also reads OpenStreetMap's `opening_hours` format, used by community-listed places
 (see the section at the end).
@@ -23,11 +25,18 @@ from datetime import datetime, timedelta
 
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]  # index = datetime.weekday()
 _T = r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?"  # one clock time: hour, optional :minutes, am/pm
-_RANGE = re.compile(rf"{_T}\s*(?:-|–|—|to)\s*{_T}", re.I)  # "8am-4pm", "10:00 am - 6:00 pm"
+_SUN = r"(dawn|sunrise|dusk|sunset)"  # a time that moves with the seasons
+_POINT = rf"(?:{_T}|{_SUN})"  # a clock time or a sun word
+_RANGE = re.compile(rf"{_POINT}\s*(?:-|–|—|to)\s*{_POINT}", re.I)  # "8am-4pm", "10:00 am - 6 pm", "7:30am - dusk"
 _DAY_LINE = re.compile(rf"^\s*({'|'.join(DAYS)})\b[\s:]*(.*)$", re.I)  # "Monday: ..." or "Monday<TAB>..."
 SEASONAL_WINTER_MONTHS = (11, 12, 1, 2, 3)  # when seasonal sites are often shut
+# The range a sun word covers in NYC over the year (minutes after midnight): sunset is
+# 4:30 PM at the earliest and dusk ends by 9:15 PM; dawn starts by 4:45 AM, sunrise ends by 7:30 AM.
+DUSK_RANGE = (16 * 60 + 30, 21 * 60 + 15)
+DAWN_RANGE = (4 * 60 + 45, 7 * 60 + 30)
 
-# Times of day below are minutes after midnight (480 = 8 AM).
+# Times of day below are minutes after midnight (480 = 8 AM). A time can also be a sun
+# word ("dusk"), kept as text because its clock time changes with the season.
 
 
 def _minutes(h: str, m: str | None, ap: str) -> int:
@@ -43,20 +52,26 @@ def fmt(minute: int) -> str:
     return f"{h % 12 or 12}{f':{m:02d}' if m else ''} {suffix}"
 
 
-def _range(text: str) -> tuple[int, int] | None:
-    """The first 'open - close' range in text as (open, close) minutes, or None."""
+def _label(point: int | str) -> str:
+    """A range end for people: 480 -> '8 AM', 'dusk' -> 'dusk'."""
+    return point if isinstance(point, str) else fmt(point)
+
+
+def _range(text: str) -> tuple | None:
+    """The first 'open - close' range in text as (open, close), or None. Each end is minutes or a sun word."""
     found = _RANGE.search(text)
     if not found:
         return None
-    h1, m1, a1, h2, m2, a2 = found.groups()
-    return _minutes(h1, m1, a1), _minutes(h2, m2, a2)
+    h1, m1, a1, sun1, h2, m2, a2, sun2 = found.groups()
+    return (sun1.lower() if sun1 else _minutes(h1, m1, a1)), (sun2.lower() if sun2 else _minutes(h2, m2, a2))
 
 
 def parse_hours(text: str | None) -> dict:
-    """Return {"kind", "days", "later_seasonally"}.
+    """Return {"kind", "days", "later_seasonally"}, plus "ranges" for kind "several".
 
-    kind: always | daily | weekly | none | unparsed
-    days: {0..6: (open, close) | "closed" | "bad"}  (0 = Monday)
+    kind: always | daily | weekly | several | none | unparsed
+    days: {0..6: (open, close) | "closed" | "bad"}  (0 = Monday); each end is minutes or a sun word
+    ranges: for "several" only, every (open, close) in the text
     """
     raw = (text or "").strip()
     if not raw:
@@ -80,6 +95,12 @@ def parse_hours(text: str | None) -> dict:
     if days:
         return {"kind": "weekly", "days": days, "later_seasonally": later}
 
+    # Several different ranges without day names we read ("M-F 10:30am-5:15pm S-S 12:00pm-8:00pm",
+    # "(indoor season) ... (outdoor season)"): we cannot tell which applies, so status_at checks them all
+    ranges = list(dict.fromkeys(_range(m.group(0)) for m in _RANGE.finditer(raw)))
+    if len(ranges) > 1:
+        return {"kind": "several", "days": {}, "ranges": ranges, "later_seasonally": later}
+
     # No day names: a single range that applies every day
     single = _range(raw)
     if single:
@@ -87,9 +108,26 @@ def parse_hours(text: str | None) -> dict:
     return {"kind": "unparsed", "days": {}, "later_seasonally": later}
 
 
-def _window_state(window: tuple[int, int], minute: int, later: bool) -> tuple[str, str]:
+def _sun_window_state(start: int | str, end: int | str, minute: int) -> tuple[str, str]:
+    """(state, reason) for a window with a sun word at one end. The word's clock time is only
+    known to lie in DAWN_RANGE / DUSK_RANGE, so only times outside that range are certain."""
+    opens = DAWN_RANGE if isinstance(start, str) else (start, start)  # earliest and latest it could open
+    closes = DUSK_RANGE if isinstance(end, str) else (end, end)
+    if minute < opens[0]:
+        return "closed", f"opens at {_label(start)}"
+    if minute >= closes[1]:
+        return "closed", f"closed since {_label(end)}"
+    if opens[1] <= minute < closes[0]:
+        return "open", f"open until {_label(end)}"
+    word = start if minute < opens[1] else end
+    return "unclear", f"listed hours are {_label(start)} – {_label(end)}, and {word} changes with the season"
+
+
+def _window_state(window: tuple, minute: int, later: bool) -> tuple[str, str]:
     """(state, reason) for one day's (open, close) window at `minute` of that day."""
     start, end = window
+    if isinstance(start, str) or isinstance(end, str):
+        return _sun_window_state(start, end, minute)
     # Closing time at or before opening time: an overnight range if it ends by 6 AM, else a typo
     if end <= start:
         if end <= 6 * 60:  # genuine overnight range, e.g. 8pm-2am
@@ -117,6 +155,15 @@ def status_at(text: str | None, when: datetime) -> dict:
         return {"state": "unclear", "reason": "no hours are listed for this site"}
     if kind == "unparsed":
         return {"state": "unclear", "reason": f"could not interpret the listed hours: {(text or '')[:60]!r}"}
+    minute = when.hour * 60 + when.minute
+    if kind == "several":
+        # Certain only when every listed range gives the same answer
+        states = {_window_state(r, minute, sched["later_seasonally"])[0] for r in sched["ranges"]}
+        if len(states) == 1 and states != {"unclear"}:
+            state = states.pop()
+            return {"state": state, "reason": f"{state} under each of its listed hours: {(text or '')[:60]!r}"}
+        reason = f"its listed hours give different times for different days or seasons: {(text or '')[:60]!r}"
+        return {"state": "unclear", "reason": reason}
 
     day = when.weekday()
     entry = sched["days"].get(day)
@@ -127,7 +174,7 @@ def status_at(text: str | None, when: datetime) -> dict:
         return {"state": "closed", "reason": f"closed on {name}s"}
     if entry == "bad":
         return {"state": "unclear", "reason": f"could not interpret the {name} hours"}
-    state, reason = _window_state(entry, when.hour * 60 + when.minute, sched["later_seasonally"])
+    state, reason = _window_state(entry, minute, sched["later_seasonally"])
     return {"state": state, "reason": reason}
 
 
@@ -136,7 +183,7 @@ def hours_for_day(text: str | None, weekday: int) -> str:
     sched = parse_hours(text)
     if sched["kind"] == "always":
         return "24 hours"
-    if sched["kind"] in ("none", "unparsed"):
+    if sched["kind"] in ("none", "unparsed", "several"):
         return "not listed" if sched["kind"] == "none" else (text or "")[:40]
     entry = sched["days"].get(weekday)
     if entry is None:
@@ -146,7 +193,7 @@ def hours_for_day(text: str | None, weekday: int) -> str:
     if entry == "bad":
         return "unreadable"
     note = " (later in some seasons)" if sched["later_seasonally"] else ""
-    return f"{fmt(entry[0])} – {fmt(entry[1])}{note}"
+    return f"{_label(entry[0])} – {_label(entry[1])}{note}"
 
 
 def next_open(text: str | None, when: datetime) -> str | None:
@@ -159,12 +206,19 @@ def next_open(text: str | None, when: datetime) -> str | None:
     for offset in range(8):  # today, then each of the next seven days
         day = when + timedelta(days=offset)
         entry = sched["days"].get(day.weekday())
-        # Skip closed or unreadable days, and typo ranges (same rule as _window_state)
-        if not isinstance(entry, tuple) or entry[1] <= entry[0] and entry[1] > 6 * 60:
+        if not isinstance(entry, tuple):
+            continue  # closed or unreadable day
+        start, end = entry
+        if isinstance(start, str):  # opens at dawn: its clock time is unknown, so name the day only
+            if offset or when.hour * 60 + when.minute < DAWN_RANGE[0]:
+                return f"{day.strftime('%A')} at {start}"
             continue
-        opens = day.replace(hour=entry[0] // 60, minute=entry[0] % 60, second=0, microsecond=0)
+        # Skip typo ranges (same rule as _window_state)
+        if isinstance(end, int) and end <= start and end > 6 * 60:
+            continue
+        opens = day.replace(hour=start // 60, minute=start % 60, second=0, microsecond=0)
         if opens > when:
-            return f"{opens.strftime('%A')} at {fmt(entry[0])}"
+            return f"{opens.strftime('%A')} at {fmt(start)}"
     return None
 
 

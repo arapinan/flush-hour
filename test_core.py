@@ -52,6 +52,25 @@ def test_hours():
     assert state("8pm-2am", datetime(2026, 10, 5, 23, 0)) == "open"  # genuine overnight
 
 
+def test_dusk_and_several_ranges():
+    """Sun words in the real data, and text with several ranges: certain only where every reading agrees."""
+    dusk = "7:30am - dusk"                                     # Central Park Chess & Checkers House
+    assert state(dusk, MON_1AM) == "closed" and "opens at 7:30 AM" in status_at(dusk, MON_1AM)["reason"]
+    assert state(dusk, MON_11) == "open"                       # dusk is never before 4:30 PM
+    assert state(dusk, MON_5PM) == "unclear" and "dusk changes with the season" in status_at(dusk, MON_5PM)["reason"]
+    assert state(dusk, datetime(2026, 10, 5, 22, 0)) == "closed"   # dusk is always over by 9:15 PM
+    assert state("dawn - dusk", datetime(2026, 10, 5, 3, 0)) == "closed" and state("dawn - dusk", MON_11) == "open"
+    assert hours_for_day(dusk, 0) == "7:30 AM – dusk" and next_open(dusk, MON_1AM) == "Monday at 7:30 AM"
+    assert next_open("dawn - dusk", MON_1AM) == "Monday at dawn"
+
+    split = "M-F 10:30am-5:15pm S-S 12:00pm-8:00pm"            # which range is which day is not read
+    assert parse_hours(split)["kind"] == "several"
+    assert state(split, MON_1AM) == "closed" and state(split, datetime(2026, 10, 5, 13, 0)) == "open"  # both agree
+    assert state(split, datetime(2026, 10, 10, 11, 30)) == "unclear"   # one says open, the other not yet
+    weekdays = "Weekdays - 12pm-Dusk Weekends 11am-Dusk"
+    assert state(weekdays, datetime(2026, 10, 5, 10, 0)) == "closed"                 # before both openings
+
+
 def test_helpers():
     """Per-day hours strings and the next opening time."""
     assert hours_for_day(WEEKLY, 0) == "10 AM – 6 PM" and hours_for_day(WEEKLY, 6) == "Closed"
@@ -114,6 +133,6 @@ def test_geo():
 
 
 if __name__ == "__main__":
-    for fn in (test_hours, test_helpers, test_availability, test_osm_hours, test_geo):
+    for fn in (test_hours, test_dusk_and_several_ranges, test_helpers, test_availability, test_osm_hours, test_geo):
         fn()
         print("ok", fn.__name__)
