@@ -10,11 +10,16 @@ Formats seen in the real data (check_apis.py output):
 Some weekly tables contain typos like "Tuesday: 10:00 pm - 7:00 pm"; we flag
 those as unclear instead of trusting them.
 
+Also reads OpenStreetMap's `opening_hours` format, used by community-listed places
+(see the section at the end).
+
 Pure standard library so it can be tested offline.
 """
 
 import re
 from datetime import datetime, timedelta
+
+# --- The city's hours_of_operation text ---
 
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]  # index = datetime.weekday()
 _T = r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?"  # one clock time: hour, optional :minutes, am/pm
@@ -180,3 +185,79 @@ def availability(row: dict, when: datetime) -> dict:
         verdict["state"] = "unclear"
         verdict["reason"] += "; seasonal site, and winter months are often closed — verify before walking over"
     return verdict
+
+
+# --- OpenStreetMap opening_hours ---
+#
+# Community-listed places and OpenStreetMap toilets carry hours in OSM's own format:
+#   "24/7"
+#   "Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00; Su 12:00-24:00"
+#   "Mo-Fr 08:00-12:00,13:00-17:00; Sa,Su off; PH off"
+# Only this common subset is read. Anything else (months, "sunset", "10:00+") is unclear
+# rather than guessed. Ranges here are minutes after midnight; a close past 1440 runs overnight.
+
+OSM_DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]  # index = datetime.weekday()
+_OSM_RULE = re.compile(r"(?:([A-Za-z]{2}(?:\s*[-,]\s*[A-Za-z]{2})*)\s+)?(.+)")  # optional days, then times
+_OSM_RANGE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")  # "12:00-01:00"
+
+
+def _osm_days(text: str) -> list[int] | None:
+    """'Mo-Fr,Su' -> [0, 1, 2, 3, 4, 6]; a wrapping span like 'Fr-Mo' works too. None if not understood."""
+    days = []
+    for part in text.replace(" ", "").split(","):
+        ends = part.split("-")
+        if len(ends) > 2 or any(e not in OSM_DAYS for e in ends):
+            return None
+        first, last = OSM_DAYS.index(ends[0]), OSM_DAYS.index(ends[-1])
+        days += [(first + i) % 7 for i in range((last - first) % 7 + 1)]
+    return days
+
+
+def parse_osm_hours(text: str | None) -> dict[int, list[tuple[int, int]]] | None:
+    """OSM opening_hours -> {weekday: [(open, close), ...]}, or None if it is not in the subset we read.
+
+    A day no rule mentions is closed, as in OSM. A later rule replaces an earlier one for its days.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    if raw == "24/7":
+        return {d: [(0, 1440)] for d in range(7)}
+    week: dict[int, list[tuple[int, int]]] = {}
+    for rule in filter(None, (r.strip() for r in raw.split(";"))):
+        days_text, times_text = _OSM_RULE.fullmatch(rule).groups()
+        if days_text and days_text.upper().startswith("PH"):
+            continue  # public holidays: ignored
+        days = _osm_days(days_text) if days_text else list(range(7))
+        if days is None:
+            return None
+        ranges = []
+        if times_text.strip().lower() not in ("off", "closed"):
+            for part in times_text.split(","):
+                found = _OSM_RANGE.fullmatch(part.strip())
+                if not found:
+                    return None
+                h1, m1, h2, m2 = map(int, found.groups())
+                start, end = h1 * 60 + m1, h2 * 60 + m2
+                ranges.append((start, end if end > start else end + 1440))  # "12:00-01:00" runs past midnight
+        for d in days:
+            week[d] = ranges
+    return week
+
+
+def osm_status_at(text: str | None, when: datetime) -> dict:
+    """Do these OSM hours say the place is open at `when`? -> {"state", "reason"}, like status_at."""
+    if (text or "").strip() == "24/7":
+        return {"state": "open", "reason": "listed hours say open 24/7"}
+    week = parse_osm_hours(text)
+    if week is None:
+        return {"state": "unclear", "reason": f"could not interpret the listed hours: {(text or '')[:60]!r}"}
+    minute, day = when.hour * 60 + when.minute, when.weekday()
+    # Today's ranges, then yesterday's ranges that run past midnight into today
+    for start, end in week.get(day, []):
+        if start <= minute < end:
+            return {"state": "open", "reason": f"listed hours say open until {fmt(end)}"}
+    for start, end in week.get((day - 1) % 7, []):
+        if minute < end - 1440:
+            return {"state": "open", "reason": f"listed hours say open until {fmt(end)}"}
+    return {"state": "closed", "reason": "listed hours say closed at this time"}

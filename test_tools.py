@@ -406,7 +406,7 @@ def test_route():
 
 def test_fallback():
     """The three fallback tiers: duplicates dropped, hours required, and outages answered quietly."""
-    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")   # 1 AM Monday
+    out = call("fallback_options", location="Columbia", when="2026-10-05T22:00")   # 10 PM Monday: the shops are still open
     assert len(out["options"]) <= 3                                                  # default limit is 3
     names = [o["name"] for o in out["options"]]
     assert "Same spot as Anibal Aviles" not in names                                 # duplicate of an official site
@@ -421,11 +421,11 @@ def test_fallback():
     CALLS["osm_fails"] = False
     tools._cache.clear()
     CALLS["hours_lookups"].clear()
-    default = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    default = call("fallback_options", location="Columbia", when="2026-10-05T22:00")
     assert len(default["options"]) == 3
-    assert len(call("fallback_options", location="Columbia", when="2026-10-05T01:00", limit=10)["options"]) == 3  # hard cap
+    assert len(call("fallback_options", location="Columbia", when="2026-10-05T22:00", limit=10)["options"]) == 3  # hard cap
     tools.MAX_RESULTS = 10                                                           # look past the cap
-    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    out = call("fallback_options", location="Columbia", when="2026-10-05T22:00")
     tools.MAX_RESULTS = 3
     assert len(out["options"]) > len(default["options"])
     osm = [o for o in out["options"] if o["tier"] == "openstreetmap"]
@@ -438,7 +438,7 @@ def test_fallback():
 
     tools._cache.clear()
     CALLS["hours_down"] = True
-    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")
+    out = call("fallback_options", location="Columbia", when="2026-10-05T22:00")
     assert not [o for o in out["options"] if o["tier"] == "community_listed"]
     assert "notes" not in out and "error" not in out
     CALLS["hours_down"] = False
@@ -463,7 +463,23 @@ def test_fallback_applies_needs():
     assert official["status"] == "unclear" and official["hours_that_day"] and official["accessibility"] == "Fully Accessible"
 
 
+def test_fallback_listed_hours():
+    """Listed hours are read: closed places are left out, and ones that say open rank above uncertain ones."""
+    CALLS["osm_fails"] = False
+    tools._cache.clear()
+    tools.MAX_RESULTS = 10                                                           # look past the cap
+    out = call("fallback_options", location="Columbia", when="2026-10-05T01:00")    # 1 AM Monday
+    tools.MAX_RESULTS = 3
+    CALLS["osm_fails"] = True
+    names = [o["name"] for o in out["options"]]
+    assert "Hungarian Pastry Shop" not in names                                      # Mo-Su 08:00-23:30: shut at 1 AM
+    parlor = next(o for o in out["options"] if o["name"] == "Arts and Crafts Beer Parlor")
+    assert parlor["listed_hours_status"] == "open" and "2 AM" in parlor["listed_hours_note"]  # 11:00-02:00 runs overnight
+    ranks = [o.get("listed_hours_status") != "open" for o in out["options"]]
+    assert ranks == sorted(ranks)                                                    # listed open before uncertain
+
+
 if __name__ == "__main__":
-    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_applies_needs):
+    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_fallback_applies_needs):
         fn()
         print("ok", fn.__name__)

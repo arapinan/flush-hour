@@ -4,7 +4,7 @@ Run: uv run python test_core.py
 from datetime import datetime
 
 from geo import detour_m, grid_distance_m, haversine_m, in_nyc, route_position, walk_minutes
-from hours import availability, hours_for_day, next_open, parse_hours, status_at
+from hours import availability, hours_for_day, next_open, osm_status_at, parse_hours, parse_osm_hours, status_at
 
 SUN = datetime(2026, 10, 4, 21, 15)   # Sunday 9:15 PM
 MON_AM = datetime(2026, 10, 5, 9, 0)  # Monday 9 AM
@@ -73,6 +73,23 @@ def test_availability():
     assert availability({**base, "open": None}, MON_AM)["state"] == "open"
 
 
+def test_osm_hours():
+    """OpenStreetMap opening_hours: overnight ranges, days off, wrapping day spans, and formats we do not read."""
+    tavern = "Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00; Su 12:00-24:00"
+    assert osm_status_at(tavern, datetime(2026, 10, 6, 22, 0))["state"] == "open"      # Tuesday 10 PM
+    assert osm_status_at(tavern, datetime(2026, 10, 6, 1, 0))["state"] == "closed"     # Monday's hours end at midnight
+    assert osm_status_at(tavern, datetime(2026, 10, 10, 0, 30))["state"] == "open"     # Friday night runs to 1 AM
+    weekdays = "Mo-Fr 08:00-12:00,13:00-17:00; Sa,Su off; PH off"
+    assert osm_status_at(weekdays, MON_11)["state"] == "open"
+    assert osm_status_at(weekdays, datetime(2026, 10, 5, 12, 30))["state"] == "closed"  # lunch break
+    assert osm_status_at(weekdays, datetime(2026, 10, 10, 10, 0))["state"] == "closed"  # Saturday off
+    assert parse_osm_hours("Fr-Mo 09:00-17:00")[6] == [(540, 1020)]                     # span wraps past Sunday
+    assert osm_status_at("24/7", MON_1AM)["state"] == "open"
+    assert osm_status_at("Mo-Fr 10:00+", MON_11)["state"] == "unclear"                  # open-ended: not guessed
+    assert osm_status_at("Jan-Mar Mo-Fr 09:00-17:00", MON_11)["state"] == "unclear"     # months: not read
+    assert osm_status_at(None, MON_11)["state"] == "unclear"
+
+
 def test_geo():
     """Grid walking distance, walking minutes, and position along and detour from a route."""
     columbia, astor = (40.8075, -73.9626), (40.7296, -73.9912)
@@ -88,6 +105,6 @@ def test_geo():
 
 
 if __name__ == "__main__":
-    for fn in (test_hours, test_helpers, test_availability, test_geo):
+    for fn in (test_hours, test_helpers, test_availability, test_osm_hours, test_geo):
         fn()
         print("ok", fn.__name__)

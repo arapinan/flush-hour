@@ -24,7 +24,7 @@ Follow-ups worth trying in the same chat: `Will the first one be open Sunday nig
 | `find_restrooms` | Official NYC restrooms near a place, ranked by estimated walking time, skipping any that are closed at the requested time. Searches 800 m, widens to 2 km on its own if nothing is open, and respects a distance the user states. | NYC Open Data "Public Restrooms", NYC GeoSearch, OpenStreetMap Nominatim (business names) |
 | `restrooms_along_route` | Restrooms near a walk from A to B, ordered along the route, with detour cost, hours checked at arrival time, and the longest stretch without a stop. | same |
 | `check_open_status` | Weekly hours, open/closed/unclear at a given time, and the next opening time for one restroom. | same |
-| `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Only places with known opening hours are returned; volunteer listings get theirs from the same business on OpenStreetMap. Saved needs are applied like in `find_restrooms`. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass, Nominatim) |
+| `fallback_options` | When nothing official is open: sites with uncertain hours, volunteer-listed restrooms (with listing age and votes), and OpenStreetMap toilets. Only places with known opening hours are returned; volunteer listings get theirs from the same business on OpenStreetMap. Those hours are checked against the requested time, and places they say are closed are left out. Saved needs are applied like in `find_restrooms`. Results are ordered: needs met, then hours that say open, then uncertain hours, then walking time. Each has a confidence level. | Refuge Restrooms, OpenStreetMap (Overpass, Nominatim) |
 | `remember_needs` | Saves standing needs for the session so later searches apply them automatically. | session state |
 
 Tool-writing choices (from the tool-calling lecture):
@@ -39,14 +39,14 @@ Tool-writing choices (from the tool-calling lecture):
 
 ## How it handles messy data
 
-The hours column has several formats (single daily range, weekly tables with colons or tabs, "24 Hours", blanks) and some typos such as `Tuesday: 10:00 pm - 7:00 pm`. `hours.py` parses all of them and returns **open**, **closed**, or **unclear** with a reason, instead of guessing. Seasonal sites are flagged in winter months. Walking time uses Manhattan's rotated street grid (about 29 degrees) rather than a straight line; it is an estimate, and the agent says so.
+The hours column has several formats (single daily range, weekly tables with colons or tabs, "24 Hours", blanks) and some typos such as `Tuesday: 10:00 pm - 7:00 pm`. `hours.py` parses all of them and returns **open**, **closed**, or **unclear** with a reason, instead of guessing. Seasonal sites are flagged in winter months. Community and OpenStreetMap places use OSM's `opening_hours` format (`Mo-Th 12:00-24:00; Fr-Sa 12:00-01:00`); `hours.py` reads its common forms, including overnight ranges and days off, and calls anything else unclear. Walking time uses Manhattan's rotated street grid (about 29 degrees) rather than a straight line; it is an estimate, and the agent says so.
 
 ## Files
 
 - `app.py`: FastAPI server, agent loop, sessions. `/chat` returns `response`, `session_id`, `tool_calls`.
 - `tools.py`: the five tools and their JSON schemas.
 - `hours.py`, `geo.py`: opening-hours parsing and distance math (standard library only).
-- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options", places confirmed to meet the user's needs first, then by walking time (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). An explanation every card shares is shown once above them. If nothing is confirmed open, the page (not the model) suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
+- `index.html`: the interface. Results confirmed open are shown first; anything with uncertain hours goes under "Uncertain Options", in the same order as `fallback_options` (at most 3 cards each, or up to 5 confirmed-open stops for a walking route). An explanation every card shares is shown once above them. If nothing is confirmed open, the page (not the model) suggests using the bathroom at home. Each answer has a "How I found this" panel listing every tool call.
 - `test_core.py`, `test_tools.py`: offline tests using real rows from the dataset.
 - `check_apis.py`, `probe_geocoding.py`: developer scripts, not used by the app. `check_apis.py` prints a live response from each data source (the tests and the hours parser were written against its output); `probe_geocoding.py` shows how the location lookup handles tricky place names. Both need network access.
 

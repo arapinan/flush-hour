@@ -34,7 +34,7 @@ from geo import (
     route_position,
     walk_minutes,
 )
-from hours import availability, hours_for_day, next_open
+from hours import availability, hours_for_day, next_open, osm_status_at
 
 NYC_TZ = ZoneInfo("America/New_York")
 # The public OpenStreetMap servers require requests to identify themselves.
@@ -827,7 +827,8 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
     1. official sites whose hours are uncertain at `when`
     2. volunteer-listed businesses (Refuge Restrooms), with hours borrowed from OpenStreetMap
     3. OpenStreetMap toilets that list hours
-    Places that fail one of the user's needs are left out, as in find_restrooms.
+    Places that fail one of the user's needs, or whose listed hours say closed at `when`, are left out.
+    Order: needs met, then hours that say open, then uncertain hours, then the shortest walk.
     The two outside sources are best-effort: if one fails, the other tiers still answer.
     """
     origin, label = geocode(location)
@@ -909,6 +910,9 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 nominatim_failed = True  # the service is down: stop asking it
         if not hours_raw:
             continue  # no known hours: left out
+        listed = osm_status_at(hours_raw, when_dt)
+        if listed["state"] == "closed":
+            continue  # its own hours say it is shut then
         with_hours += 1
         option = {
             "tier": "community_listed", "confidence": r["confidence"],
@@ -917,6 +921,7 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
             "community_votes": f"{r['upvotes']} up / {r['downvotes']} down",
             "listing_age_years": r["listing_age_years"],
             "hours_raw": hours_raw,
+            "listed_hours_status": listed["state"], "listed_hours_note": listed["reason"],
             "caveat": "Listed by volunteers; hours are from OpenStreetMap for this business, not verified by the city, "
                       "and the restroom may be for customers only.",
             "map_link": _maps_link(r["point"]),
@@ -931,6 +936,9 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 continue
             if not o["hours_raw"]:
                 continue
+            listed = osm_status_at(o["hours_raw"], when_dt)
+            if listed["state"] == "closed":
+                continue
             tags = o["need_tags"]
             fit, unconfirmed = _fit({n: tags[n] if tags[n] in ("yes", "no") else "unknown" for n in needs})
             if fit == "no":
@@ -940,16 +948,16 @@ def fallback_options(state: dict, location: str, when: str | None = None, radius
                 "walk_min": walk_minutes(grid_distance_m(origin, o["point"])),
                 "access": o["access"], "fee": o["fee"], "wheelchair": tags["wheelchair"] == "yes",
                 "all_gender": tags["gender_neutral"] == "yes", "changing_station": tags["changing_station"] == "yes",
-                "hours_raw": o["hours_raw"], "map_link": _maps_link(o["point"]),
+                "hours_raw": o["hours_raw"], "listed_hours_status": listed["state"],
+                "listed_hours_note": listed["reason"], "map_link": _maps_link(o["point"]),
             }
             if unconfirmed:
                 option["unconfirmed_needs"] = unconfirmed
             options.append(option)
 
-    # Places confirmed to meet the needs first; within each group the most trustworthy tier,
-    # then confidence, then the shortest walk
-    tier_rank = {"official_but_hours_uncertain": 0, "community_listed": 1, "openstreetmap": 2}
-    options.sort(key=lambda o: (bool(o.get("unconfirmed_needs")), tier_rank[o["tier"]], conf_rank[o["confidence"]], o["walk_min"]))
+    # Places confirmed to meet the needs first, then ones whose listed hours say open (official
+    # sites here are all uncertain), then the shortest walk. The page sorts the same way.
+    options.sort(key=lambda o: (bool(o.get("unconfirmed_needs")), o.get("listed_hours_status") != "open", o["walk_min"]))
     out = {
         "searched_near": label,
         "at_time": _nyc_time_label(when_dt),
@@ -1062,9 +1070,10 @@ TOOLS = [
             "Last-resort places to try when find_restrooms has nothing open or suitable: official sites whose hours "
             "are uncertain, volunteer-listed restrooms in businesses and campus buildings (with listing age and "
             "votes), and OpenStreetMap toilets. Only places with known opening hours are returned (hours_raw, from "
-            "OpenStreetMap, in its opening_hours format); compare them to the requested time yourself. Applies the "
-            "user's needs like find_restrooms. Each option carries a confidence and caveat; be honest with the user "
-            "that these are less reliable. Call find_restrooms first."
+            "OpenStreetMap); listed_hours_status says whether those hours are open at the requested time, and places "
+            "whose hours say closed are left out. Applies the user's needs like find_restrooms. Results are ordered: "
+            "needs met, then listed hours open, then uncertain hours, then the shortest walk. Each option carries a "
+            "confidence and caveat; be honest with the user that these are less reliable. Call find_restrooms first."
         ),
         "parameters": {"type": "object", "properties": {
             "location": {"type": "string", "description": _LOCATION},

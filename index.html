@@ -211,12 +211,13 @@
   }
 
   // The door-lock status pill: green open, red closed, amber not sure.
-  function lock(status) {
+  // suffix marks where the status comes from when it is not the city's own data.
+  function lock(status, suffix = "") {
     const label = STATUS_LABEL[status];
     if (!label) return null;
     const pill = h("span", "lock " + status);
     pill.appendChild(h("i"));
-    pill.appendChild(document.createTextNode(label));
+    pill.appendChild(document.createTextNode(label + suffix));
     return pill;
   }
 
@@ -281,7 +282,8 @@
     if (r.hours_raw) body.appendChild(h("div", "sub", "Hours (OpenStreetMap): " + r.hours_raw));
 
     const row = h("div", "row");
-    const pill = lock(r.status);
+    // Community and OpenStreetMap places have no city status, only what their own listed hours say
+    const pill = lock(r.status) || lock(r.listed_hours_status, " (listed hours)");
     if (pill) row.appendChild(pill);
     // Official sites already carry the status pill; the tier tag only marks the other sources
     if (TIER_LABEL[r.tier]) row.appendChild(h("span", "tag", TIER_LABEL[r.tier] + (r.confidence === "low" ? ", low confidence" : "")));
@@ -375,13 +377,22 @@
     return box.childElementCount ? box : null;
   }
 
-  // The "Uncertain Options" section: everything held back above, without repeats. Places
-  // confirmed to meet the user's needs come first, then the shortest walk.
+  // Sort key parts, in this order: needs met, then hours that say open, then the shortest walk.
+  // fallback_options sorts its own results the same way.
+  function needsUnmet(r) {
+    return Boolean(r.unconfirmed_needs?.length);
+  }
+  function hoursUncertain(r) {
+    return r.status !== "open" && r.listed_hours_status !== "open";
+  }
+
+  // The "Uncertain Options" section: everything held back above, without repeats, best first.
   function renderUncertain(turn) {
     const seen = new Set();
     const items = turn.uncertain
       .filter(({ r }) => !r.id || (!seen.has(r.id) && seen.add(r.id)))
-      .sort((a, b) => Boolean(a.r.unconfirmed_needs?.length) - Boolean(b.r.unconfirmed_needs?.length)
+      .sort((a, b) => needsUnmet(a.r) - needsUnmet(b.r)
+        || hoursUncertain(a.r) - hoursUncertain(b.r)
         || (minutesOf(a.r, a.kind) ?? Infinity) - (minutesOf(b.r, b.kind) ?? Infinity))
       .slice(0, MAX_PER_SECTION);
     if (!items.length) return null;
