@@ -534,19 +534,20 @@ def find_restrooms(state: dict, location: str, radius_m: int | None = None, need
     radius_m = _clamp(radius_m, 100, 3000, DEFAULT_RADIUS_M) if explicit_radius else DEFAULT_RADIUS_M
 
     def scan(radius: int) -> tuple[list, list, list]:
-        """Sort the sites within `radius` into: meets the needs, might meet them, closed."""
+        """Sort the sites within `radius` that do not fail a need into: meets the needs, might meet them, closed."""
         confirmed, maybe, closed = [], [], []
         for site in nyc_sites():
             # Straight-line distance decides what is in range; the grid estimate is what we report
             if haversine_m(origin, site["point"]) > radius:
                 continue
+            # Needs first, so a closed site that would not work anyway is never named as the nearest closed one
+            fit, unconfirmed = _meets(site, needs)
+            if fit == "no":
+                continue
             verdict = availability(site["row"], when_dt)
             walk_m = grid_distance_m(origin, site["point"])
             if verdict["state"] == "closed":
                 closed.append((walk_m, site, verdict))
-                continue
-            fit, unconfirmed = _meets(site, needs)
-            if fit == "no":
                 continue
             entry = (walk_m, site, verdict, unconfirmed)
             (confirmed if fit == "yes" else maybe).append(entry)
@@ -623,14 +624,14 @@ def restrooms_along_route(state: dict, start: str, end: str, max_detour_m: int =
         detour = detour_m(a, b, site["point"])
         if detour > max_detour_m:
             continue
+        fit, unconfirmed = _meets(site, needs)
+        if fit == "no":
+            continue  # before the hours, so the closed count only counts stops that would work
         to_stop = grid_distance_m(a, site["point"])
         arrival = when_dt + timedelta(minutes=walk_minutes(to_stop))  # judge hours at the time you would arrive
         verdict = availability(site["row"], arrival)
         if verdict["state"] == "closed":
             closed += 1
-            continue
-        fit, unconfirmed = _meets(site, needs)
-        if fit == "no":
             continue
         found.append((detour, to_stop, site, verdict, unconfirmed, fit))
 

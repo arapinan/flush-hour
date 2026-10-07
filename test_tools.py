@@ -257,6 +257,16 @@ def test_needs_and_session_memory():
     assert other_session["needs_applied"] == []                               # sessions stay separate
 
 
+def test_nearest_closed_meets_needs():
+    """The nearest closed site a result names must be one the user could use once it opens."""
+    tennis = "40.81130,-73.96570"                                                # right by the Not Accessible tennis courts
+    plain = call("find_restrooms", location=tennis, when="2026-10-05T01:00")    # 1 AM: the park sites are closed
+    assert plain["nearest_closed"]["name"] == "Wildlife Sanct. & 119 St Tennis Courts"
+    out = call("find_restrooms", location=tennis, needs=["wheelchair"], when="2026-10-05T01:00")
+    assert out["nearest_closed"]["name"] != "Wildlife Sanct. & 119 St Tennis Courts", out["nearest_closed"]
+    assert out["closed_nearby_omitted"] == plain["closed_nearby_omitted"] - 1   # it is not counted either
+
+
 def test_disambiguation():
     """A name matching several places asks which one, and the chosen option resolves without a second lookup."""
     when = "2026-10-05T11:00"
@@ -501,6 +511,6 @@ def test_one_site_listed_twice():
 
 
 if __name__ == "__main__":
-    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_one_site_listed_twice, test_fallback_applies_needs):
+    for fn in (test_find, test_disambiguation, test_business_beats_fuzzy_match, test_exact_name_and_chains, test_outage_is_not_cached, test_services_agree_on_one_spot, test_radius_widening, test_needs_and_session_memory, test_nearest_closed_meets_needs, test_errors, test_bug_inside_tool_is_not_bad_arguments, test_unreadable_arguments, test_check_open_status, test_route, test_fallback, test_fallback_listed_hours, test_one_site_listed_twice, test_fallback_applies_needs):
         fn()
         print("ok", fn.__name__)
