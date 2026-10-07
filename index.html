@@ -339,8 +339,9 @@
     try { data = JSON.parse(call.result); } catch { return null; }
     const box = h("section", "results");
 
-    // A tool error: show the message
-    if (data.error) { box.appendChild(h("div", "note", data.error)); return box; }
+    // A tool error is written for the model, which retries or explains it in its reply.
+    // It is not shown here; the "How I found this" panel still lists it.
+    if (data.error) return null;
 
     // The place name was ambiguous: one button per option, each sending the choice as a message
     if (data.needs_clarification) {
